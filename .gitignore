@@ -1,0 +1,6 @@
+.venv/
+*.log
+prompts_history.jsonl
+__pycache__/
+*.pyc
+.env
