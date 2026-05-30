@@ -6,8 +6,12 @@ WebSocket Agent Service — 与 WebSocketAgentClient 配套的落地实现。
 
 会话模型 (session 化, 支持单个逻辑 agent 多实例):
   init 由服务端铸造唯一 session_id 并下发; 之后的 perceive/act 都携带该 session_id.
-  LangGraph checkpointer 的 thread_id = session_id, 因此每次 init = 一条互相隔离的会话,
-  即使多个实例复用同一 agent_id 也互不串台.
+  SessionStore 以 session_id 为键, 每个实例一份独立状态, 因此每次 init = 一条互相隔离
+  的会话, 即使多个实例复用同一 agent_id 也互不串台. 空闲超过 TTL (默认 2h, 可配
+  SESSION_TTL_SECONDS) 的 session 会被后台清理.
+
+  调试端点 (同端口 HTTP): GET /debug/prompts (JSON), GET /debug/view (HTML),
+  均支持 ?session_id= 过滤.
 
 协议:
   客户端 → 服务端:
@@ -41,11 +45,8 @@ from websockets.datastructures import Headers
 from websockets.http11 import Request, Response
 
 # 复用现有的 agent 核心逻辑
-from agents.agent_graph import (
-    perceive_graph_compiled,
-    act_graph_compiled,
-    checkpointer,
-)
+from agents.agent_graph import run_perceive, run_act
+from agents.session_store import SessionStore
 from agents.state import make_initial_state
 from utils.prompt_logger import prompt_logger
 from utils.debug_view import render_prompts_html
@@ -54,14 +55,13 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ws_agent_service")
 
 
-def _config(session_id: str) -> dict:
-    """LangGraph 配置: thread_id 即 session_id, 一次 init 一条隔离会话."""
-    return {"configurable": {"thread_id": session_id}}
+# 每个 session_id 一份独立状态; 空闲超过 TTL (默认 2h, 可配 SESSION_TTL_SECONDS) 后清理.
+store = SessionStore()
 
 
 async def _process_init(agent_id: str, role: str, teammates: list,
                         req_id: str) -> tuple[str, dict]:
-    """初始化 agent: 铸造唯一 session_id, 创建初始状态并写入 checkpointer.
+    """初始化 agent: 铸造唯一 session_id, 创建初始状态并写入 SessionStore.
 
     返回 (session_id, response). session_id 作为该实例后续 perceive/act 的路由键.
     """
@@ -69,9 +69,10 @@ async def _process_init(agent_id: str, role: str, teammates: list,
     initial = make_initial_state(agent_id)
     initial["my_role"] = role
     initial["session_id"] = session_id
-    initial["request"] = {"status": "start", "message": ",".join(teammates), "round": 0}
 
-    await perceive_graph_compiled.ainvoke(initial, _config(session_id))
+    request = {"status": "start", "message": ",".join(teammates), "round": 0}
+    state = run_perceive(initial, request)
+    store.create(session_id, state)
     logger.info(f"Agent {agent_id} initialized as {role}, session={session_id}")
     return session_id, {
         "type": "init_ok",
@@ -84,9 +85,8 @@ async def _process_init(agent_id: str, role: str, teammates: list,
 async def _process_perceive(session_id: str, req_id: str, status: str,
                             message: str, round_num: int, traces: list) -> dict:
     """处理感知事件 (按 session_id 路由)."""
-    config = _config(session_id)
-    existing = await perceive_graph_compiled.aget_state(config)
-    if not existing or not existing.values:
+    state = store.get(session_id)
+    if state is None:
         return {"type": "error", "req_id": req_id,
                 "detail": "Session not found. Send init first."}
 
@@ -96,10 +96,7 @@ async def _process_perceive(session_id: str, req_id: str, status: str,
         "round": round_num,
         "traces": traces or [],
     }
-    base_state = existing.values
-    input_state = {**base_state, "request": request}
-
-    await perceive_graph_compiled.ainvoke(input_state, config)
+    store.set(session_id, run_perceive(state, request))
     return {"type": "perceive_ok", "req_id": req_id}
 
 
@@ -110,9 +107,8 @@ async def _process_act(session_id: str, agent_id: str, req_id: str, status: str,
     返回帧列表: reflection 非空时先下发一帧 thought (思考过程回传),
     再跟一帧 act_result.
     """
-    config = _config(session_id)
-    existing = await perceive_graph_compiled.aget_state(config)
-    if not existing or not existing.values:
+    state = store.get(session_id)
+    if state is None:
         return [{"type": "error", "req_id": req_id,
                  "detail": "Session not found. Send init first."}]
 
@@ -121,10 +117,9 @@ async def _process_act(session_id: str, agent_id: str, req_id: str, status: str,
         "message": message,
         "round": round_num,
     }
-    base_state = existing.values
-    input_state = {**base_state, "request": req_dict, "phase": status}
-
-    result = await act_graph_compiled.ainvoke(input_state, config)
+    # LLM 调用是阻塞的, 放到线程池避免卡住事件循环.
+    result = await asyncio.to_thread(run_act, state, req_dict)
+    store.set(session_id, result)
 
     frames = []
     thought = (result.get("last_thought") or "").strip()
@@ -249,6 +244,15 @@ async def process_request(connection: ServerConnection, request: Request):
     )
 
 
+async def _cleanup_loop(interval: float):
+    """周期性清理过期 session, 释放内存."""
+    while True:
+        await asyncio.sleep(interval)
+        removed = store.cleanup_expired()
+        if removed:
+            logger.info(f"Cleaned up {removed} expired session(s); {store.active_count()} active")
+
+
 async def main(host: str = "0.0.0.0", port: int = 7861):
     """启动 WebSocket Agent 服务."""
     stop = asyncio.get_event_loop().create_future()
@@ -259,12 +263,18 @@ async def main(host: str = "0.0.0.0", port: int = 7861):
         except NotImplementedError:
             pass
 
+    cleanup_interval = min(max(store.ttl / 4, 60.0), 300.0)
+    cleanup_task = asyncio.create_task(_cleanup_loop(cleanup_interval))
+
     async with websockets.serve(
         handle_connection, host, port, max_size=2**20, process_request=process_request
     ):
         logger.info(f"WS Agent Service running on ws://{host}:{port}")
         logger.info(f"Debug endpoints: http://{host}:{port}/debug/view (and /debug/prompts)")
+        logger.info(f"Session TTL: {store.ttl}s, cleanup every {cleanup_interval}s")
         await stop
+
+    cleanup_task.cancel()
 
 
 if __name__ == "__main__":
