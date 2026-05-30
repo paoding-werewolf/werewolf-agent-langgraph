@@ -4,11 +4,23 @@ WebSocket Agent Service — 与 WebSocketAgentClient 配套的落地实现。
 复用全部现有 HTTP 版的 agent logic (agent_graph / state / prompt_builder / llm_caller),
 仅将 transport 层从 HTTP FastAPI 改为 WebSocket 长连接。
 
-协议:
-  客户端 → 服务端: {"type": "init|perceive|act", "req_id": "...", "agent_id": "...", ...}
-  服务端 → 客户端: {"type": "act_result", "req_id": "...", "result": "...", "target": "..."}
+会话模型 (session 化, 支持单个逻辑 agent 多实例):
+  init 由服务端铸造唯一 session_id 并下发; 之后的 perceive/act 都携带该 session_id.
+  LangGraph checkpointer 的 thread_id = session_id, 因此每次 init = 一条互相隔离的会话,
+  即使多个实例复用同一 agent_id 也互不串台.
 
-每个 agent 维持一条独立 WS 连接, 使用 LangGraph MemorySaver 在内存持久化状态.
+协议:
+  客户端 → 服务端:
+    init      {"type": "init", "req_id": "...", "agent_id": "...", "role": "...", "teammates": [...]}
+    perceive  {"type": "perceive", "req_id": "...", "session_id": "...", "status": "...", ...}
+    act       {"type": "act", "req_id": "...", "session_id": "...", "status": "...", ...}
+  服务端 → 客户端:
+    init_ok     {"type": "init_ok", "req_id": "...", "session_id": "...", "agent_id": "..."}
+    perceive_ok {"type": "perceive_ok", "req_id": "..."}
+    act_result  {"type": "act_result", "req_id": "...", "result": "...", "target": "..."}
+    error       {"type": "error", "req_id": "...", "detail": "..."}
+
+向后兼容: perceive/act 若未带 session_id, 回退使用 agent_id 作为 thread_id.
 """
 
 import asyncio
@@ -16,6 +28,7 @@ import json
 import logging
 import signal
 import sys
+import uuid
 import websockets
 from websockets.asyncio.server import ServerConnection
 
@@ -31,28 +44,40 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ws_agent_service")
 
 
-def _config(agent_id: str) -> dict:
-    return {"configurable": {"thread_id": agent_id}}
+def _config(session_id: str) -> dict:
+    """LangGraph 配置: thread_id 即 session_id, 一次 init 一条隔离会话."""
+    return {"configurable": {"thread_id": session_id}}
 
 
-async def _process_init(agent_id: str, role: str, teammates: list) -> dict:
-    """初始化 agent: 创建初始状态并写入 checkpointer."""
+async def _process_init(agent_id: str, role: str, teammates: list,
+                        req_id: str) -> tuple[str, dict]:
+    """初始化 agent: 铸造唯一 session_id, 创建初始状态并写入 checkpointer.
+
+    返回 (session_id, response). session_id 作为该实例后续 perceive/act 的路由键.
+    """
+    session_id = uuid.uuid4().hex
     initial = make_initial_state(agent_id)
     initial["my_role"] = role
     initial["request"] = {"status": "start", "message": ",".join(teammates), "round": 0}
 
-    result = await perceive_graph_compiled.ainvoke(initial, _config(agent_id))
-    logger.info(f"Agent {agent_id} initialized as {role}")
-    return {"type": "init_ok", "agent_id": agent_id}
+    await perceive_graph_compiled.ainvoke(initial, _config(session_id))
+    logger.info(f"Agent {agent_id} initialized as {role}, session={session_id}")
+    return session_id, {
+        "type": "init_ok",
+        "req_id": req_id,
+        "session_id": session_id,
+        "agent_id": agent_id,
+    }
 
 
-async def _process_perceive(agent_id: str, status: str, message: str,
-                            round_num: int, traces: list) -> dict:
-    """处理感知事件."""
-    config = _config(agent_id)
+async def _process_perceive(session_id: str, req_id: str, status: str,
+                            message: str, round_num: int, traces: list) -> dict:
+    """处理感知事件 (按 session_id 路由)."""
+    config = _config(session_id)
     existing = await perceive_graph_compiled.aget_state(config)
     if not existing or not existing.values:
-        return {"type": "error", "detail": "Agent not found. Send init first."}
+        return {"type": "error", "req_id": req_id,
+                "detail": "Session not found. Send init first."}
 
     request = {
         "status": status,
@@ -64,16 +89,17 @@ async def _process_perceive(agent_id: str, status: str, message: str,
     input_state = {**base_state, "request": request}
 
     await perceive_graph_compiled.ainvoke(input_state, config)
-    return {"type": "perceive_ok"}
+    return {"type": "perceive_ok", "req_id": req_id}
 
 
-async def _process_act(agent_id: str, req_id: str, status: str,
+async def _process_act(session_id: str, req_id: str, status: str,
                        message: str, round_num: int) -> dict:
-    """处理行动请求, 返回 act_result."""
-    config = _config(agent_id)
+    """处理行动请求, 返回 act_result (按 session_id 路由)."""
+    config = _config(session_id)
     existing = await perceive_graph_compiled.aget_state(config)
     if not existing or not existing.values:
-        return {"type": "error", "detail": "Agent not found. Send init first."}
+        return {"type": "error", "req_id": req_id,
+                "detail": "Session not found. Send init first."}
 
     req_dict = {
         "status": status,
@@ -94,8 +120,13 @@ async def _process_act(agent_id: str, req_id: str, status: str,
     }
 
 
+def _route_thread_id(msg: dict, fallback: str) -> str:
+    """优先用 session_id 路由; 缺省回退到 agent_id (兼容老客户端)."""
+    return msg.get("session_id") or msg.get("agent_id") or fallback
+
+
 async def handle_connection(ws: ServerConnection):
-    """处理单个 agent 的 WebSocket 连接."""
+    """处理 agent 的 WebSocket 连接 (一条连接可承载该 agent 的多个 session)."""
     agent_id = None
     try:
         async for raw in ws:
@@ -106,17 +137,20 @@ async def handle_connection(ws: ServerConnection):
                 continue
 
             msg_type = msg.get("type")
+            req_id = msg.get("req_id", "0")
 
             if msg_type == "init":
                 agent_id = msg.get("agent_id", "")
                 role = msg.get("role", "villager")
                 teammates = msg.get("teammates", [])
-                resp = await _process_init(agent_id, role, teammates)
+                _session_id, resp = await _process_init(
+                    agent_id, role, teammates, req_id
+                )
 
             elif msg_type == "perceive":
-                agent_id = msg.get("agent_id", agent_id or "")
                 resp = await _process_perceive(
-                    agent_id,
+                    _route_thread_id(msg, agent_id or ""),
+                    req_id,
                     msg.get("status", ""),
                     msg.get("message", ""),
                     msg.get("round", 1),
@@ -124,17 +158,17 @@ async def handle_connection(ws: ServerConnection):
                 )
 
             elif msg_type == "act":
-                agent_id = msg.get("agent_id", agent_id or "")
                 resp = await _process_act(
-                    agent_id,
-                    msg.get("req_id", "0"),
+                    _route_thread_id(msg, agent_id or ""),
+                    req_id,
                     msg.get("status", ""),
                     msg.get("message", ""),
                     msg.get("round", 1),
                 )
 
             else:
-                resp = {"type": "error", "detail": f"Unknown message type: {msg_type}"}
+                resp = {"type": "error", "req_id": req_id,
+                        "detail": f"Unknown message type: {msg_type}"}
 
             await ws.send(json.dumps(resp, ensure_ascii=False))
 
