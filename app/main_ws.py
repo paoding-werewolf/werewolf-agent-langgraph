@@ -17,6 +17,8 @@ WebSocket Agent Service — 与 WebSocketAgentClient 配套的落地实现。
   服务端 → 客户端:
     init_ok     {"type": "init_ok", "req_id": "...", "session_id": "...", "agent_id": "..."}
     perceive_ok {"type": "perceive_ok", "req_id": "..."}
+    thought     {"type": "thought", "session_id": "...", "agent_id": "...", "round": N,
+                 "phase": "...", "content": "...", "seq": K}   # 思考过程回传, 可随时多次下发
     act_result  {"type": "act_result", "req_id": "...", "result": "...", "target": "..."}
     error       {"type": "error", "req_id": "...", "detail": "..."}
 
@@ -92,14 +94,18 @@ async def _process_perceive(session_id: str, req_id: str, status: str,
     return {"type": "perceive_ok", "req_id": req_id}
 
 
-async def _process_act(session_id: str, req_id: str, status: str,
-                       message: str, round_num: int) -> dict:
-    """处理行动请求, 返回 act_result (按 session_id 路由)."""
+async def _process_act(session_id: str, agent_id: str, req_id: str, status: str,
+                       message: str, round_num: int) -> list:
+    """处理行动请求 (按 session_id 路由).
+
+    返回帧列表: reflection 非空时先下发一帧 thought (思考过程回传),
+    再跟一帧 act_result.
+    """
     config = _config(session_id)
     existing = await perceive_graph_compiled.aget_state(config)
     if not existing or not existing.values:
-        return {"type": "error", "req_id": req_id,
-                "detail": "Session not found. Send init first."}
+        return [{"type": "error", "req_id": req_id,
+                 "detail": "Session not found. Send init first."}]
 
     req_dict = {
         "status": status,
@@ -111,13 +117,27 @@ async def _process_act(session_id: str, req_id: str, status: str,
 
     result = await act_graph_compiled.ainvoke(input_state, config)
 
+    frames = []
+    thought = (result.get("last_thought") or "").strip()
+    if thought:
+        frames.append({
+            "type": "thought",
+            "session_id": session_id,
+            "agent_id": agent_id,
+            "round": round_num,
+            "phase": status,
+            "content": thought,
+            "seq": 0,
+        })
+
     action = result.get("next_action", {})
-    return {
+    frames.append({
         "type": "act_result",
         "req_id": req_id,
         "result": action.get("result", "PASS"),
         "target": action.get("target"),
-    }
+    })
+    return frames
 
 
 def _route_thread_id(msg: dict, fallback: str) -> str:
@@ -160,6 +180,7 @@ async def handle_connection(ws: ServerConnection):
             elif msg_type == "act":
                 resp = await _process_act(
                     _route_thread_id(msg, agent_id or ""),
+                    agent_id or "",
                     req_id,
                     msg.get("status", ""),
                     msg.get("message", ""),
@@ -170,7 +191,9 @@ async def handle_connection(ws: ServerConnection):
                 resp = {"type": "error", "req_id": req_id,
                         "detail": f"Unknown message type: {msg_type}"}
 
-            await ws.send(json.dumps(resp, ensure_ascii=False))
+            # 处理器可能返回单帧 (dict) 或多帧 (list, 如 thought + act_result).
+            for frame in (resp if isinstance(resp, list) else [resp]):
+                await ws.send(json.dumps(frame, ensure_ascii=False))
 
     except websockets.ConnectionClosed:
         logger.info(f"Agent {agent_id} disconnected")
