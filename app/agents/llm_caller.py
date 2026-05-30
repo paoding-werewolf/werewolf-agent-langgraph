@@ -105,17 +105,6 @@ class LLMCaller:
 
         self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
 
-    def _chat(self, system_prompt: str, user_msg: str):
-        resp = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_msg},
-            ],
-            temperature=self.temperature,
-        )
-        return resp.choices[0].message
-
     def _chat_with_tools(self, system_prompt: str, user_msg: str):
         resp = self.client.chat.completions.create(
             model=self.model,
@@ -162,17 +151,6 @@ class LLMCaller:
 
         return action
 
-    def call_with_log_sync(self, agent_id: str, phase: str, system_prompt: str, user_msg: str,
-                           session_id: str = "") -> str:
-        try:
-            message = self._chat(system_prompt, user_msg)
-            response_text = message.content or ""
-        except Exception as e:
-            response_text = f"ERROR: {str(e)}"
-
-        prompt_logger.log(agent_id, phase, system_prompt, user_msg, response_text, session_id)
-        return response_text
-
     def decide_with_tools_sync(self, agent_id: str, phase: str,
                                system_prompt: str, user_msg: str,
                                session_id: str = "") -> Optional[Dict[str, Any]]:
@@ -205,15 +183,19 @@ class LLMCaller:
                 args = json.loads(tc.function.arguments or "{}")
             except json.JSONDecodeError:
                 args = {}
-            return self._tool_call_to_action(tc.function.name, args)
+            action = self._tool_call_to_action(tc.function.name, args)
+            action["thought"] = content
+            return action
 
         try:
             match = re.search(r'\{.*\}', content, re.DOTALL)
             if match:
-                return json.loads(match.group())
-            return {"result": content, "target": "all", "extra": {}}
+                parsed = json.loads(match.group())
+                parsed.setdefault("thought", content)
+                return parsed
+            return {"result": content, "target": "all", "extra": {}, "thought": content}
         except Exception:
-            return {"result": content, "target": "all", "extra": {}}
+            return {"result": content, "target": "all", "extra": {}, "thought": content}
 
 
 llm = LLMCaller()
