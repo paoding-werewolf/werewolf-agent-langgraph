@@ -26,13 +26,19 @@ WebSocket Agent Service — 与 WebSocketAgentClient 配套的落地实现。
 """
 
 import asyncio
+import email.utils
+import http
 import json
 import logging
 import signal
 import sys
 import uuid
+from urllib.parse import urlsplit, parse_qs
+
 import websockets
 from websockets.asyncio.server import ServerConnection
+from websockets.datastructures import Headers
+from websockets.http11 import Request, Response
 
 # 复用现有的 agent 核心逻辑
 from agents.agent_graph import (
@@ -41,6 +47,8 @@ from agents.agent_graph import (
     checkpointer,
 )
 from agents.state import make_initial_state
+from utils.prompt_logger import prompt_logger
+from utils.debug_view import render_prompts_html
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ws_agent_service")
@@ -60,6 +68,7 @@ async def _process_init(agent_id: str, role: str, teammates: list,
     session_id = uuid.uuid4().hex
     initial = make_initial_state(agent_id)
     initial["my_role"] = role
+    initial["session_id"] = session_id
     initial["request"] = {"status": "start", "message": ",".join(teammates), "round": 0}
 
     await perceive_graph_compiled.ainvoke(initial, _config(session_id))
@@ -201,6 +210,45 @@ async def handle_connection(ws: ServerConnection):
         logger.exception(f"Agent {agent_id} connection error")
 
 
+def _http_response(status: http.HTTPStatus, body, content_type: str) -> Response:
+    """Build a self-contained HTTP/1.1 response (used to short-circuit the WS handshake)."""
+    if isinstance(body, str):
+        body = body.encode("utf-8")
+    headers = Headers([
+        ("Date", email.utils.formatdate(usegmt=True)),
+        ("Connection", "close"),
+        ("Content-Length", str(len(body))),
+        ("Content-Type", content_type),
+    ])
+    return Response(status.value, status.phrase, headers, body)
+
+
+async def process_request(connection: ServerConnection, request: Request):
+    """Serve the debug endpoints over plain HTTP on the same port as the WS server.
+
+    Returning a Response short-circuits the WebSocket handshake; returning None
+    lets the upgrade proceed normally so real agent clients still connect.
+
+    Both endpoints accept an optional ?session_id=... filter so a single
+    logical agent_id running multiple sessions can be inspected per session.
+      GET /debug/prompts -> JSON prompt history
+      GET /debug/view    -> HTML prompt debugger
+    """
+    parts = urlsplit(request.path)
+    if parts.path not in ("/debug/prompts", "/debug/view"):
+        return None
+
+    session_id = parse_qs(parts.query).get("session_id", [None])[0]
+    history = prompt_logger.get_history(session_id)
+
+    if parts.path == "/debug/prompts":
+        body = json.dumps(history, ensure_ascii=False)
+        return _http_response(http.HTTPStatus.OK, body, "application/json; charset=utf-8")
+    return _http_response(
+        http.HTTPStatus.OK, render_prompts_html(history), "text/html; charset=utf-8"
+    )
+
+
 async def main(host: str = "0.0.0.0", port: int = 7861):
     """启动 WebSocket Agent 服务."""
     stop = asyncio.get_event_loop().create_future()
@@ -211,8 +259,11 @@ async def main(host: str = "0.0.0.0", port: int = 7861):
         except NotImplementedError:
             pass
 
-    async with websockets.serve(handle_connection, host, port, max_size=2**20):
+    async with websockets.serve(
+        handle_connection, host, port, max_size=2**20, process_request=process_request
+    ):
         logger.info(f"WS Agent Service running on ws://{host}:{port}")
+        logger.info(f"Debug endpoints: http://{host}:{port}/debug/view (and /debug/prompts)")
         await stop
 
 

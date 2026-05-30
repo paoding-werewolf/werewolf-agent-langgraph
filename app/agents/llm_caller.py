@@ -193,17 +193,19 @@ class LLMCaller:
 
         return action
 
-    async def call_with_log(self, agent_id: str, phase: str, system_prompt: str, user_msg: str) -> str:
+    async def call_with_log(self, agent_id: str, phase: str, system_prompt: str, user_msg: str,
+                            session_id: str = "") -> str:
         response_text = ""
         try:
             response_text = await self.chat(system_prompt, user_msg)
         except Exception as e:
             response_text = f"ERROR: {str(e)}"
 
-        prompt_logger.log(agent_id, phase, system_prompt, user_msg, response_text)
+        prompt_logger.log(agent_id, phase, system_prompt, user_msg, response_text, session_id)
         return response_text
 
-    def call_with_log_sync(self, agent_id: str, phase: str, system_prompt: str, user_msg: str) -> str:
+    def call_with_log_sync(self, agent_id: str, phase: str, system_prompt: str, user_msg: str,
+                           session_id: str = "") -> str:
         response_text = ""
         try:
             messages = [
@@ -215,31 +217,34 @@ class LLMCaller:
         except Exception as e:
             response_text = f"ERROR: {str(e)}"
 
-        prompt_logger.log(agent_id, phase, system_prompt, user_msg, response_text)
+        prompt_logger.log(agent_id, phase, system_prompt, user_msg, response_text, session_id)
         return response_text
 
     async def decide_with_tools(self, agent_id: str, phase: str,
-                                 system_prompt: str, user_msg: str) -> Optional[Dict[str, Any]]:
+                                 system_prompt: str, user_msg: str,
+                                 session_id: str = "") -> Optional[Dict[str, Any]]:
         response = await self.chat_with_tools(system_prompt, user_msg)
-        return self._process_tool_response(agent_id, phase, system_prompt, user_msg, response)
+        return self._process_tool_response(agent_id, phase, system_prompt, user_msg, response, session_id)
 
     def decide_with_tools_sync(self, agent_id: str, phase: str,
-                                 system_prompt: str, user_msg: str) -> Optional[Dict[str, Any]]:
+                                 system_prompt: str, user_msg: str,
+                                 session_id: str = "") -> Optional[Dict[str, Any]]:
         messages = [
             SystemMessage(content=system_prompt),
             HumanMessage(content=user_msg),
         ]
         response = self.llm_with_tools.invoke(messages)
-        return self._process_tool_response(agent_id, phase, system_prompt, user_msg, response)
+        return self._process_tool_response(agent_id, phase, system_prompt, user_msg, response, session_id)
 
     def _process_tool_response(self, agent_id: str, phase: str,
-                                 system_prompt: str, user_msg: str, response) -> Optional[Dict[str, Any]]:
+                                 system_prompt: str, user_msg: str, response,
+                                 session_id: str = "") -> Optional[Dict[str, Any]]:
         content = str(response.content) if response.content else ""
 
         full_response = content
         if response.tool_calls:
             full_response += "\n[TOOL_CALLS] " + json.dumps(response.tool_calls, ensure_ascii=False)
-        prompt_logger.log(agent_id, phase, system_prompt, user_msg, full_response)
+        prompt_logger.log(agent_id, phase, system_prompt, user_msg, full_response, session_id)
 
         if response.tool_calls:
             return self._tool_call_to_action(response.tool_calls[0])
