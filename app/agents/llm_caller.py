@@ -1,9 +1,99 @@
 import json
-from typing import Optional, List, Dict, Any
-from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
-from langchain_core.tools import tool
+import re
+from typing import Optional, Dict, Any
+
+from openai import OpenAI
+
 from utils.prompt_logger import prompt_logger
+
+
+def _fn(name: str, description: str, properties: Dict[str, Any], required: list) -> Dict[str, Any]:
+    """Build an OpenAI function-tool schema."""
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": {
+                "type": "object",
+                "properties": properties,
+                "required": required,
+            },
+        },
+    }
+
+
+# OpenAI tool schemas (ported 1:1 from the previous langchain @tool definitions).
+TOOLS = [
+    _fn("speak",
+        "Public speech in daytime discussion. Use for expressing your analysis, suspicion, "
+        "defense, or voting intention.",
+        {
+            "result": {"type": "string", "description": "Your public speech text"},
+            "target": {"type": "string", "description": "Target player ID you are addressing or voting against. Use 'all' for general speech."},
+            "extra": {"type": "object", "description": "Additional structured data if needed"},
+        },
+        ["result"]),
+    _fn("vote",
+        "Cast your elimination vote during vote phase. Must specify target and reason.",
+        {
+            "target": {"type": "string", "description": "Player ID to vote for elimination"},
+            "reason": {"type": "string", "description": "Your reason for this vote"},
+        },
+        ["target", "reason"]),
+    _fn("wolf_kill",
+        "Wolf night action: choose a player to kill.",
+        {
+            "target": {"type": "string", "description": "Player ID to kill"},
+            "reason": {"type": "string", "description": "Strategic reason for this target"},
+        },
+        ["target"]),
+    _fn("wolf_gesture",
+        "Wolf team communication gesture during night phase.",
+        {
+            "gesture": {"type": "string", "description": "Gesture type (point, lowkey, shift, change, agree, pass)"},
+            "target": {"type": "string", "description": "Target player ID for the gesture"},
+        },
+        ["gesture"]),
+    _fn("seer_check",
+        "Seer night action: check a player's alignment.",
+        {"target": {"type": "string", "description": "Player ID to check"}},
+        ["target"]),
+    _fn("witch_heal",
+        "Witch night action: use antidote to save a player.",
+        {"target": {"type": "string", "description": "Player ID to heal"}},
+        ["target"]),
+    _fn("witch_poison",
+        "Witch night action: use poison to kill a player.",
+        {"target": {"type": "string", "description": "Player ID to poison"}},
+        ["target"]),
+    _fn("guard_protect",
+        "Guard night action: protect a player from wolf attack.",
+        {"target": {"type": "string", "description": "Player ID to protect"}},
+        ["target"]),
+    _fn("shoot",
+        "Hunter/Wolf King skill: shoot a player when dying.",
+        {
+            "target": {"type": "string", "description": "Player ID to shoot (or 'pass' to not shoot)"},
+            "reason": {"type": "string", "description": "Reason for this shot"},
+        },
+        ["target"]),
+    _fn("signup_sheriff",
+        "Sign up for sheriff election.",
+        {"reason": {"type": "string", "description": "Why you should be sheriff"}},
+        []),
+    _fn("vote_sheriff",
+        "Vote for a sheriff candidate.",
+        {
+            "target": {"type": "string", "description": "Player ID to vote for as sheriff"},
+            "reason": {"type": "string", "description": "Why you're voting for this candidate"},
+        },
+        ["target"]),
+    _fn("pass_turn",
+        "Pass your turn without taking any action.",
+        {},
+        []),
+]
 
 
 class LLMCaller:
@@ -11,155 +101,36 @@ class LLMCaller:
         self.api_key = "sk-REMOVED"
         self.base_url = "https://claude35.shop/v1"
         self.model = "deepseek-v4-pro"
+        self.temperature = 0.7
 
-        self._create_tools()
-        self.llm = ChatOpenAI(
-            api_key=self.api_key,
-            base_url=self.base_url,
+        self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+
+    def _chat(self, system_prompt: str, user_msg: str):
+        resp = self.client.chat.completions.create(
             model=self.model,
-            temperature=0.7,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_msg},
+            ],
+            temperature=self.temperature,
         )
-        self.llm_with_tools = self.llm.bind_tools(self._tools)
+        return resp.choices[0].message
 
-    def _create_tools(self):
-        @tool
-        def speak(result: str, target: str = "all", extra: Optional[Dict[str, Any]] = None):
-            """Public speech in daytime discussion. Use for expressing your analysis, suspicion, defense, or voting intention.
+    def _chat_with_tools(self, system_prompt: str, user_msg: str):
+        resp = self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_msg},
+            ],
+            tools=TOOLS,
+            tool_choice="auto",
+            temperature=self.temperature,
+        )
+        return resp.choices[0].message
 
-            Args:
-                result: Your public speech text
-                target: Target player ID you are addressing or voting against. Use "all" for general speech.
-                extra: Additional structured data if needed
-            """
-            pass
-
-        @tool
-        def vote(target: str, reason: str):
-            """Cast your elimination vote during vote phase. Must specify target and reason.
-
-            Args:
-                target: Player ID to vote for elimination
-                reason: Your reason for this vote
-            """
-            pass
-
-        @tool
-        def wolf_kill(target: str, reason: str = ""):
-            """Wolf night action: choose a player to kill.
-
-            Args:
-                target: Player ID to kill
-                reason: Strategic reason for this target
-            """
-            pass
-
-        @tool
-        def wolf_gesture(gesture: str, target: Optional[str] = None):
-            """Wolf team communication gesture during night phase.
-
-            Args:
-                gesture: Gesture type (point, lowkey, shift, change, agree, pass)
-                target: Target player ID for the gesture
-            """
-            pass
-
-        @tool
-        def seer_check(target: str):
-            """Seer night action: check a player's alignment.
-
-            Args:
-                target: Player ID to check
-            """
-            pass
-
-        @tool
-        def witch_heal(target: str):
-            """Witch night action: use antidote to save a player.
-
-            Args:
-                target: Player ID to heal
-            """
-            pass
-
-        @tool
-        def witch_poison(target: str):
-            """Witch night action: use poison to kill a player.
-
-            Args:
-                target: Player ID to poison
-            """
-            pass
-
-        @tool
-        def guard_protect(target: str):
-            """Guard night action: protect a player from wolf attack.
-
-            Args:
-                target: Player ID to protect
-            """
-            pass
-
-        @tool
-        def shoot(target: str, reason: str = ""):
-            """Hunter/Wolf King skill: shoot a player when dying.
-
-            Args:
-                target: Player ID to shoot (or "pass" to not shoot)
-                reason: Reason for this shot
-            """
-            pass
-
-        @tool
-        def signup_sheriff(reason: str = ""):
-            """Sign up for sheriff election.
-
-            Args:
-                reason: Why you should be sheriff
-            """
-            pass
-
-        @tool
-        def vote_sheriff(target: str, reason: str = ""):
-            """Vote for a sheriff candidate.
-
-            Args:
-                target: Player ID to vote for as sheriff
-                reason: Why you're voting for this candidate
-            """
-            pass
-
-        @tool
-        def pass_turn():
-            """Pass your turn without taking any action."""
-            pass
-
-        self._tools = [
-            speak, vote, wolf_kill, wolf_gesture, seer_check,
-            witch_heal, witch_poison, guard_protect, shoot,
-            signup_sheriff, vote_sheriff, pass_turn,
-        ]
-
-    async def chat(self, system_prompt: str, human_msg: str) -> str:
-        messages = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=human_msg),
-        ]
-        response = await self.llm.ainvoke(messages)
-        return str(response.content)
-
-    async def chat_with_tools(self, system_prompt: str, human_msg: str) -> AIMessage:
-        messages = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=human_msg),
-        ]
-        response = await self.llm_with_tools.ainvoke(messages)
-        return response
-
-    def _tool_call_to_action(self, tool_call) -> Optional[Dict[str, Any]]:
+    def _tool_call_to_action(self, name: str, args: Dict[str, Any]) -> Dict[str, Any]:
         """Convert a tool call to the action dict format expected by game server."""
-        name = tool_call["name"]
-        args = tool_call.get("args", {})
-
         action = {
             "result": args.get("result", args.get("reason", name)),
             "target": args.get("target", "all"),
@@ -167,12 +138,10 @@ class LLMCaller:
             "tool": name,
         }
 
-        # Handle pass_turn
         if name == "pass_turn":
             action["result"] = "PASS"
             action["target"] = None
 
-        # Handle wolf_kill / seer_check / witch_* etc
         if name == "wolf_kill":
             action["result"] = args.get("reason", f"Kill player {args.get('target', '')}")
         elif name == "seer_check":
@@ -193,69 +162,56 @@ class LLMCaller:
 
         return action
 
-    async def call_with_log(self, agent_id: str, phase: str, system_prompt: str, user_msg: str,
-                            session_id: str = "") -> str:
-        response_text = ""
-        try:
-            response_text = await self.chat(system_prompt, user_msg)
-        except Exception as e:
-            response_text = f"ERROR: {str(e)}"
-
-        prompt_logger.log(agent_id, phase, system_prompt, user_msg, response_text, session_id)
-        return response_text
-
     def call_with_log_sync(self, agent_id: str, phase: str, system_prompt: str, user_msg: str,
                            session_id: str = "") -> str:
-        response_text = ""
         try:
-            messages = [
-                SystemMessage(content=system_prompt),
-                HumanMessage(content=user_msg),
-            ]
-            response = self.llm.invoke(messages)
-            response_text = str(response.content)
+            message = self._chat(system_prompt, user_msg)
+            response_text = message.content or ""
         except Exception as e:
             response_text = f"ERROR: {str(e)}"
 
         prompt_logger.log(agent_id, phase, system_prompt, user_msg, response_text, session_id)
         return response_text
 
-    async def decide_with_tools(self, agent_id: str, phase: str,
-                                 system_prompt: str, user_msg: str,
-                                 session_id: str = "") -> Optional[Dict[str, Any]]:
-        response = await self.chat_with_tools(system_prompt, user_msg)
-        return self._process_tool_response(agent_id, phase, system_prompt, user_msg, response, session_id)
-
     def decide_with_tools_sync(self, agent_id: str, phase: str,
-                                 system_prompt: str, user_msg: str,
-                                 session_id: str = "") -> Optional[Dict[str, Any]]:
-        messages = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=user_msg),
-        ]
-        response = self.llm_with_tools.invoke(messages)
-        return self._process_tool_response(agent_id, phase, system_prompt, user_msg, response, session_id)
+                               system_prompt: str, user_msg: str,
+                               session_id: str = "") -> Optional[Dict[str, Any]]:
+        try:
+            message = self._chat_with_tools(system_prompt, user_msg)
+        except Exception as e:
+            err = f"ERROR: {str(e)}"
+            prompt_logger.log(agent_id, phase, system_prompt, user_msg, err, session_id)
+            return {"result": err, "target": "all", "extra": {}}
+        return self._process_tool_response(agent_id, phase, system_prompt, user_msg, message, session_id)
 
     def _process_tool_response(self, agent_id: str, phase: str,
-                                 system_prompt: str, user_msg: str, response,
-                                 session_id: str = "") -> Optional[Dict[str, Any]]:
-        content = str(response.content) if response.content else ""
+                               system_prompt: str, user_msg: str, message,
+                               session_id: str = "") -> Optional[Dict[str, Any]]:
+        content = message.content or ""
+        tool_calls = message.tool_calls or []
 
         full_response = content
-        if response.tool_calls:
-            full_response += "\n[TOOL_CALLS] " + json.dumps(response.tool_calls, ensure_ascii=False)
+        if tool_calls:
+            serialized = [
+                {"name": tc.function.name, "args": tc.function.arguments}
+                for tc in tool_calls
+            ]
+            full_response += "\n[TOOL_CALLS] " + json.dumps(serialized, ensure_ascii=False)
         prompt_logger.log(agent_id, phase, system_prompt, user_msg, full_response, session_id)
 
-        if response.tool_calls:
-            return self._tool_call_to_action(response.tool_calls[0])
+        if tool_calls:
+            tc = tool_calls[0]
+            try:
+                args = json.loads(tc.function.arguments or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            return self._tool_call_to_action(tc.function.name, args)
 
-        import re
         try:
             match = re.search(r'\{.*\}', content, re.DOTALL)
             if match:
                 return json.loads(match.group())
-            else:
-                return {"result": content, "target": "all", "extra": {}}
+            return {"result": content, "target": "all", "extra": {}}
         except Exception:
             return {"result": content, "target": "all", "extra": {}}
 

@@ -1,19 +1,14 @@
 import re
 from typing import Literal
-from langgraph.graph import StateGraph, END
-from langgraph.checkpoint.memory import MemorySaver
 from core.enums import Role, PHASE_CONFIG
 
-from agents.state import AgentState, make_initial_state
+from agents.state import AgentState
 from agents.llm_caller import llm
 from agents.prompt_builder import PromptBuilder
 
-# Shared checkpointer across both graphs
-checkpointer = MemorySaver()
-
 
 # ============================================================
-# Perceive Graph — processes incoming game events
+# Perceive — processes incoming game events
 # ============================================================
 
 def _parse_event(state: AgentState) -> AgentState:
@@ -99,15 +94,8 @@ def _extract_sheriff_from_events(events, players):
     return None
 
 
-perceive_graph = StateGraph(AgentState)
-perceive_graph.add_node("process_event", _parse_event)
-perceive_graph.set_entry_point("process_event")
-perceive_graph.add_edge("process_event", END)
-perceive_graph_compiled = perceive_graph.compile(checkpointer=checkpointer)
-
-
 # ============================================================
-# Act Graph — AI decision making with conditional branching
+# Act — AI decision making with conditional branching
 # ============================================================
 
 def _reflect_node(state: AgentState) -> AgentState:
@@ -392,37 +380,16 @@ Message: {req.get('message', '')}
     return {**state, "next_action": action}
 
 
-# ---- Act Graph Construction ----
-act_graph = StateGraph(AgentState)
-
-act_graph.add_node("reflect", _reflect_node)
-act_graph.add_node("decide_night_role", _decide_night_role)
-act_graph.add_node("decide_wolf_gesture", _decide_wolf_gesture)
-act_graph.add_node("decide_election", _decide_election)
-act_graph.add_node("decide_discussion", _decide_discussion)
-act_graph.add_node("decide_vote", _decide_vote)
-act_graph.add_node("decide_shoot", _decide_shoot)
-act_graph.add_node("decide_generic", _decide_generic)
-
-act_graph.set_entry_point("reflect")
-act_graph.add_conditional_edges(
-    "reflect",
-    _route_by_phase,
-    {
-        "decide_night_role": "decide_night_role",
-        "decide_wolf_gesture": "decide_wolf_gesture",
-        "decide_election": "decide_election",
-        "decide_discussion": "decide_discussion",
-        "decide_vote": "decide_vote",
-        "decide_shoot": "decide_shoot",
-        "decide_generic": "decide_generic",
-    },
-)
-for node in ["decide_night_role", "decide_wolf_gesture", "decide_election",
-             "decide_discussion", "decide_vote", "decide_shoot", "decide_generic"]:
-    act_graph.add_edge(node, END)
-
-act_graph_compiled = act_graph.compile(checkpointer=checkpointer)
+# Phase-group -> decider. _route_by_phase returns one of these keys.
+_DECIDERS = {
+    "decide_night_role": _decide_night_role,
+    "decide_wolf_gesture": _decide_wolf_gesture,
+    "decide_election": _decide_election,
+    "decide_discussion": _decide_discussion,
+    "decide_vote": _decide_vote,
+    "decide_shoot": _decide_shoot,
+    "decide_generic": _decide_generic,
+}
 
 
 # ============================================================
@@ -459,29 +426,17 @@ def _to_agent_game_state(state: AgentState):
 
 
 # ============================================================
-# Graph API
+# Engine API — plain synchronous orchestration (no graph runtime)
 # ============================================================
 
-async def perceive(agent_id: str, request: dict) -> AgentState:
-    """Process a game event through the perceive graph."""
-    config = {"configurable": {"thread_id": agent_id}}
-    initial = make_initial_state(agent_id)
-    input_state = {**initial, "request": request}
-    result = await perceive_graph_compiled.ainvoke(input_state, config)
-    return result
+def run_perceive(state: AgentState, request: dict) -> AgentState:
+    """Fold an incoming game event into the agent's state. No LLM call."""
+    return _parse_event({**state, "request": request})
 
 
-async def act(agent_id: str, request: dict) -> dict:
-    """Make a game decision through the act graph."""
-    config = {"configurable": {"thread_id": agent_id}}
-
-    # Try to get existing state from checkpoint; fallback to initial
-    existing = await perceive_graph_compiled.aget_state(config)
-    if existing and existing.values:
-        base_state = existing.values
-    else:
-        base_state = make_initial_state(agent_id)
-
-    input_state = {**base_state, "request": request}
-    result = await act_graph_compiled.ainvoke(input_state, config)
-    return result
+def run_act(state: AgentState, request: dict) -> AgentState:
+    """Reflect, route by phase, then run the matching decider. Blocking (LLM)."""
+    state = {**state, "request": request, "phase": request.get("status", state.get("phase", ""))}
+    state = _reflect_node(state)
+    decider = _DECIDERS[_route_by_phase(state)]
+    return decider(state)
