@@ -98,30 +98,15 @@ def _extract_sheriff_from_events(events, players):
 # Act — AI decision making with conditional branching
 # ============================================================
 
-def _reflect_node(state: AgentState) -> AgentState:
-    """AI internal reflection: analyze the game state and form thoughts."""
-    builder = PromptBuilder(Role(state["my_role"]), state["me_id"])
-
-    task_guidance = """
-[TASK: CRITICAL REFLECTION]
-1. Scan the Game Progress Timeline. Identify logical contradictions.
-2. Who is the most suspicious Wolf? Who are the confirmed Gods?
-3. What is your current stance? Are you being suspected? How will you defend?
+# Reflection and decision are merged into a single LLM call: the decider prompt
+# asks the model to reason briefly, then emit the action tool call in one reply.
+# This shared block replaces the former standalone reflect step.
+_THINK_FIRST = """
+[STEP 1 - ANALYZE] Reason briefly before acting:
+- Scan the Game Progress Timeline for logical contradictions.
+- Who is the most suspicious Wolf? Who are the confirmed Gods?
+- What is your current stance? Are you suspected? How will you defend?
 """
-    final_instr = "Output your internal monologue. Be concise and logical."
-
-    gs = _to_agent_game_state(state)
-    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, "")
-
-    reflection = llm.call_with_log_sync(
-        state["me_id"],
-        f"{state['phase']}_reflect",
-        "You are a Werewolf Logic Master. Focus on reasoning.",
-        full_prompt,
-        session_id=state.get("session_id", ""),
-    )
-
-    return {**state, "last_thought": reflection}
 
 
 def _route_by_phase(state: AgentState) -> Literal[
@@ -172,15 +157,12 @@ def _decide_night_role(state: AgentState) -> AgentState:
 [TASK: NIGHT ACTION]
 Current Phase: {req.get('status', state['phase'])}
 Message: {req.get('message', '')}
-
-Based on your internal monologue:
-{state['last_thought']}
-
-Choose the appropriate night action for your role.
+{_THINK_FIRST}
+[STEP 2 - ACT] Choose the appropriate night action for your role.
 """
-    final_instr = "Output your decision using the appropriate tool."
+    final_instr = "Reason briefly, then execute your decision with the appropriate tool in the same reply."
 
-    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, state["last_thought"])
+    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, "")
 
     action = llm.decide_with_tools_sync(
         state["me_id"], f"{state['phase']}_act",
@@ -205,13 +187,11 @@ Message: {req.get('message', '')}
 
 You are in the wolf night phase. Communicate with your wolf teammates.
 Use wolf_gesture for communication or wolf_kill to choose a target.
-
-Previous reflection:
-{state['last_thought']}
+{_THINK_FIRST}
 """
-    final_instr = "Choose your action using the appropriate tool."
+    final_instr = "Reason briefly, then choose your action using the appropriate tool in the same reply."
 
-    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, state["last_thought"])
+    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, "")
 
     action = llm.decide_with_tools_sync(
         state["me_id"], f"{state['phase']}_act",
@@ -235,12 +215,11 @@ Current Phase: {req.get('status', state['phase'])}
 Message: {req.get('message', '')}
 
 Decide whether to sign up for sheriff or vote for a candidate.
-Your previous reflection:
-{state['last_thought']}
+{_THINK_FIRST}
 """
-    final_instr = "Use signup_sheriff, vote_sheriff, or pass_turn."
+    final_instr = "Reason briefly, then use signup_sheriff, vote_sheriff, or pass_turn in the same reply."
 
-    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, state["last_thought"])
+    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, "")
 
     action = llm.decide_with_tools_sync(
         state["me_id"], f"{state['phase']}_act",
@@ -262,10 +241,7 @@ def _decide_discussion(state: AgentState) -> AgentState:
 [TASK: DAYTIME DISCUSSION]
 Current Phase: {req.get('status', state['phase'])}
 Message: {req.get('message', '')}
-
-Your internal monologue:
-{state['last_thought']}
-
+{_THINK_FIRST}
 Speak to the village. Share your analysis, point out suspects, defend yourself or allies.
 Remember: be strategic, not emotional. Good wolves hide; good villagers find them.
 
@@ -273,9 +249,9 @@ PROTOCOL:
 - Use speak tool for your speech
 - If you have nothing useful to add, use pass_turn
 """
-    final_instr = "Make your statement."
+    final_instr = "Reason briefly, then make your statement with the speak tool in the same reply."
 
-    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, state["last_thought"])
+    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, "")
 
     action = llm.decide_with_tools_sync(
         state["me_id"], f"{state['phase']}_act",
@@ -299,17 +275,15 @@ Current Phase: {req.get('status', state['phase'])}
 Message: {req.get('message', '')}
 
 You must vote to eliminate a player (or pass/abstain).
-Your analysis:
-{state['last_thought']}
-
+{_THINK_FIRST}
 PROTOCOL:
 - Use vote tool with target and reason
 - Wolves: protect your teammates, bus if necessary
 - Villagers: follow your most trusted player's lead
 """
-    final_instr = "Cast your vote using the vote tool (or pass_turn to abstain)."
+    final_instr = "Reason briefly, then cast your vote using the vote tool (or pass_turn to abstain) in the same reply."
 
-    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, state["last_thought"])
+    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, "")
 
     action = llm.decide_with_tools_sync(
         state["me_id"], f"{state['phase']}_act",
@@ -333,16 +307,15 @@ Current Phase: {req.get('status', state['phase'])}
 Message: {req.get('message', '')}
 
 You are dying. Use your shoot skill to take someone with you (or pass).
-{state['last_thought']}
-
+{_THINK_FIRST}
 PROTOCOL:
 - Use shoot tool with target (or "pass" to not shoot)
 - Hunter: take down a wolf if you know who
 - Wolf King: take down a key good player
 """
-    final_instr = "Use the shoot tool."
+    final_instr = "Reason briefly, then use the shoot tool in the same reply."
 
-    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, state["last_thought"])
+    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, "")
 
     action = llm.decide_with_tools_sync(
         state["me_id"], f"{state['phase']}_act",
@@ -364,11 +337,11 @@ def _decide_generic(state: AgentState) -> AgentState:
 [TASK: DECISION]
 Current Phase: {req.get('status', state['phase'])}
 Message: {req.get('message', '')}
-{state['last_thought']}
+{_THINK_FIRST}
 """
-    final_instr = "Use pass_turn if you have nothing to do, or speak/generic action."
+    final_instr = "Reason briefly, then use pass_turn if you have nothing to do, or the appropriate tool, in the same reply."
 
-    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, state["last_thought"])
+    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, "")
 
     action = llm.decide_with_tools_sync(
         state["me_id"], f"{state['phase']}_act",
@@ -435,8 +408,14 @@ def run_perceive(state: AgentState, request: dict) -> AgentState:
 
 
 def run_act(state: AgentState, request: dict) -> AgentState:
-    """Reflect, route by phase, then run the matching decider. Blocking (LLM)."""
+    """Route by phase, then run the matching decider in a single LLM call. Blocking.
+
+    Reflection is merged into the decision: the decider prompt asks the model to
+    reason briefly and then emit the action tool call in one response. The reasoning
+    text is surfaced back as ``last_thought`` for observability.
+    """
     state = {**state, "request": request, "phase": request.get("status", state.get("phase", ""))}
-    state = _reflect_node(state)
     decider = _DECIDERS[_route_by_phase(state)]
-    return decider(state)
+    state = decider(state)
+    thought = (state.get("next_action") or {}).get("thought", "")
+    return {**state, "last_thought": thought}
