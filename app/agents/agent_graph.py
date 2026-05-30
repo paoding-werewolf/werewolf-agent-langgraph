@@ -130,6 +130,7 @@ def _reflect_node(state: AgentState) -> AgentState:
         f"{state['phase']}_reflect",
         "You are a Werewolf Logic Master. Focus on reasoning.",
         full_prompt,
+        session_id=state.get("session_id", ""),
     )
 
     return {**state, "last_thought": reflection}
@@ -197,6 +198,7 @@ Choose the appropriate night action for your role.
         state["me_id"], f"{state['phase']}_act",
         "You are a decisive Werewolf player. Use the tools provided.",
         full_prompt,
+        session_id=state.get("session_id", ""),
     )
 
     return {**state, "next_action": action}
@@ -227,6 +229,7 @@ Previous reflection:
         state["me_id"], f"{state['phase']}_act",
         "You are a Werewolf player on the Wolf Team. Use tools to communicate and act.",
         full_prompt,
+        session_id=state.get("session_id", ""),
     )
 
     return {**state, "next_action": action}
@@ -255,6 +258,7 @@ Your previous reflection:
         state["me_id"], f"{state['phase']}_act",
         "You are a Werewolf player. Decide your election action using available tools.",
         full_prompt,
+        session_id=state.get("session_id", ""),
     )
 
     return {**state, "next_action": action}
@@ -289,6 +293,7 @@ PROTOCOL:
         state["me_id"], f"{state['phase']}_act",
         "You are a Werewolf player in daytime discussion. Use speak or pass_turn.",
         full_prompt,
+        session_id=state.get("session_id", ""),
     )
 
     return {**state, "next_action": action}
@@ -322,6 +327,7 @@ PROTOCOL:
         state["me_id"], f"{state['phase']}_act",
         "You are a Werewolf player voting to eliminate. Use vote or pass_turn.",
         full_prompt,
+        session_id=state.get("session_id", ""),
     )
 
     return {**state, "next_action": action}
@@ -354,6 +360,7 @@ PROTOCOL:
         state["me_id"], f"{state['phase']}_act",
         "You are using your shoot skill. Use shoot or pass_turn.",
         full_prompt,
+        session_id=state.get("session_id", ""),
     )
 
     return {**state, "next_action": action}
@@ -379,6 +386,7 @@ Message: {req.get('message', '')}
         state["me_id"], f"{state['phase']}_act",
         "You are a Werewolf player. Use available tools.",
         full_prompt,
+        session_id=state.get("session_id", ""),
     )
 
     return {**state, "next_action": action}

@@ -1,6 +1,6 @@
 import json
 import os
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from datetime import datetime
 
 class PromptLogger:
@@ -22,10 +22,12 @@ class PromptLogger:
             except Exception:
                 self.history = []
 
-    def log(self, agent_id: str, phase: str, system_prompt: str, user_msg: str, response: str = ""):
+    def log(self, agent_id: str, phase: str, system_prompt: str, user_msg: str,
+            response: str = "", session_id: str = ""):
         entry = {
             "timestamp": datetime.now().isoformat(),
             "agent_id": agent_id,
+            "session_id": session_id,
             "phase": phase,
             "system_prompt": system_prompt,
             "user_msg": user_msg,
@@ -40,7 +42,9 @@ class PromptLogger:
         except Exception:
             pass
 
-    def get_history(self):
+    def get_history(self, session_id: Optional[str] = None):
+        if session_id:
+            return [e for e in self.history if e.get("session_id") == session_id]
         return self.history
 
 # 单例模式

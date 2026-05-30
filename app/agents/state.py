@@ -8,6 +8,11 @@ class AgentState(TypedDict):
     room_id: str
     me_id: str
     my_role: str
+    # Full agent identifier (e.g. "1_seer") and the WS session this instance
+    # belongs to. session_id == checkpointer thread_id; empty for HTTP callers
+    # that fall back to routing by agent_id.
+    agent_id: str
+    session_id: str
 
     # Game state (all JSON-serializable for checkpointing)
     phase: str
@@ -49,6 +54,8 @@ def make_initial_state(agent_id: str) -> AgentState:
         "room_id": "unknown",
         "me_id": player_id,
         "my_role": role_val,
+        "agent_id": agent_id,
+        "session_id": "",
         "phase": "init",
         "day": 1,
         "round": 1,
