@@ -1,6 +1,4 @@
-from typing import TypedDict, List, Dict, Optional, Any, Annotated
-from langgraph.graph.message import add_messages
-from langchain_core.messages import BaseMessage
+from typing import TypedDict, List, Dict, Optional, Any
 
 
 class AgentState(TypedDict):
@@ -8,8 +6,13 @@ class AgentState(TypedDict):
     room_id: str
     me_id: str
     my_role: str
+    # Full agent identifier (e.g. "1_seer") and the session this instance
+    # belongs to. session_id is the SessionStore key (per-instance isolation);
+    # empty for HTTP callers, which route by agent_id.
+    agent_id: str
+    session_id: str
 
-    # Game state (all JSON-serializable for checkpointing)
+    # Game state (all JSON-serializable for persistence)
     phase: str
     day: int
     round: int
@@ -18,15 +21,11 @@ class AgentState(TypedDict):
     events: List[Dict[str, Any]]
 
     # Agent cognition
-    memory: List[Dict[str, Any]]
     last_thought: str
     next_action: Optional[Dict[str, Any]]
 
     # Current request from game server
     request: Optional[Dict[str, Any]]
-
-    # Message history (managed by add_messages reducer)
-    messages: Annotated[List[BaseMessage], add_messages]
 
 
 def make_initial_state(agent_id: str) -> AgentState:
@@ -49,15 +48,15 @@ def make_initial_state(agent_id: str) -> AgentState:
         "room_id": "unknown",
         "me_id": player_id,
         "my_role": role_val,
+        "agent_id": agent_id,
+        "session_id": "",
         "phase": "init",
         "day": 1,
         "round": 1,
         "sheriff": None,
         "players": players,
         "events": [],
-        "memory": [],
         "last_thought": "",
         "next_action": None,
         "request": None,
-        "messages": [],
     }
