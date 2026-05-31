@@ -1,6 +1,6 @@
 import re
 from typing import Literal
-from core.enums import Role, PHASE_CONFIG
+from core.enums import Role, PHASE_CONFIG, GamePhase as GP
 
 from agents.state import AgentState
 from agents.llm_caller import llm
@@ -110,7 +110,8 @@ _THINK_FIRST = """
 
 
 def _route_by_phase(state: AgentState) -> Literal[
-    "decide_night_role", "decide_wolf_gesture", "decide_election",
+    "decide_night_role", "decide_wolf_gesture",
+    "decide_election_signup", "decide_election_speech", "decide_election_vote",
     "decide_discussion", "decide_vote", "decide_shoot", "decide_generic",
 ]:
     """Conditional routing based on game phase group."""
@@ -130,9 +131,15 @@ def _route_by_phase(state: AgentState) -> Literal[
     if group == "witch_action" and my_role == Role.WITCH:
         return "decide_night_role"
 
-    # Election
+    # Election — route to phase-specific handler
     if group == "election":
-        return "decide_election"
+        if phase == GP.SHERIFF_ELECTION_SIGNUP:
+            return "decide_election_signup"
+        if phase in (GP.SHERIFF_ELECTION_SPEECH, GP.SHERIFF_PK_SPEECH):
+            return "decide_election_speech"
+        if phase in (GP.SHERIFF_ELECTION_VOTE, GP.SHERIFF_PK_VOTE):
+            return "decide_election_vote"
+        return "decide_election_signup"
 
     # Daytime
     if group == "discussion":
@@ -203,27 +210,94 @@ Use wolf_gesture for communication or wolf_kill to choose a target.
     return {**state, "next_action": action}
 
 
-def _decide_election(state: AgentState) -> AgentState:
-    """Sheriff election decisions."""
+def _decide_election_signup(state: AgentState) -> AgentState:
+    """Sheriff election signup: decide whether to run for sheriff."""
     builder = PromptBuilder(Role(state["my_role"]), state["me_id"])
     gs = _to_agent_game_state(state)
     req = state.get("request") or {}
 
     task_guidance = f"""
-[TASK: SHERIFF ELECTION]
+[TASK: SHERIFF ELECTION - SIGNUP]
 Current Phase: {req.get('status', state['phase'])}
 Message: {req.get('message', '')}
 
-Decide whether to sign up for sheriff or vote for a candidate.
+Decide whether YOU want to run for sheriff (上警).
 {_THINK_FIRST}
+PROTOCOL:
+- Use signup_sheriff if you want to run for sheriff
+- Use pass_turn if you do NOT want to run
+- Do NOT use vote_sheriff here — this is the signup phase, not voting
 """
-    final_instr = "Reason briefly, then use signup_sheriff, vote_sheriff, or pass_turn in the same reply."
+    final_instr = "Reason briefly, then use signup_sheriff (to run) or pass_turn (to decline) in the same reply."
 
     full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, "")
 
     action = llm.decide_with_tools_sync(
         state["me_id"], f"{state['phase']}_act",
-        "You are a Werewolf player. Decide your election action using available tools.",
+        "You are a Werewolf player deciding whether to run for sheriff. Use signup_sheriff or pass_turn.",
+        full_prompt,
+        session_id=state.get("session_id", ""),
+    )
+
+    return {**state, "next_action": action}
+
+
+def _decide_election_speech(state: AgentState) -> AgentState:
+    """Sheriff election / PK speech."""
+    builder = PromptBuilder(Role(state["my_role"]), state["me_id"])
+    gs = _to_agent_game_state(state)
+    req = state.get("request") or {}
+
+    task_guidance = f"""
+[TASK: SHERIFF ELECTION - SPEECH]
+Current Phase: {req.get('status', state['phase'])}
+Message: {req.get('message', '')}
+
+You are a sheriff candidate. Deliver your campaign speech to persuade voters.
+{_THINK_FIRST}
+PROTOCOL:
+- Use speak tool for your campaign speech
+- Be strategic: share analysis, build trust, convince others you should lead
+"""
+    final_instr = "Reason briefly, then deliver your speech with the speak tool in the same reply."
+
+    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, "")
+
+    action = llm.decide_with_tools_sync(
+        state["me_id"], f"{state['phase']}_act",
+        "You are a sheriff candidate giving a campaign speech. Use the speak tool.",
+        full_prompt,
+        session_id=state.get("session_id", ""),
+    )
+
+    return {**state, "next_action": action}
+
+
+def _decide_election_vote(state: AgentState) -> AgentState:
+    """Sheriff election / PK voting."""
+    builder = PromptBuilder(Role(state["my_role"]), state["me_id"])
+    gs = _to_agent_game_state(state)
+    req = state.get("request") or {}
+
+    task_guidance = f"""
+[TASK: SHERIFF ELECTION - VOTE]
+Current Phase: {req.get('status', state['phase'])}
+Message: {req.get('message', '')}
+
+You must vote for one of the sheriff candidates. Pick the player ID you trust most.
+{_THINK_FIRST}
+PROTOCOL:
+- Use vote_sheriff with the target player ID to cast your vote
+- Use pass_turn to abstain
+- Do NOT use signup_sheriff here — this is the voting phase
+"""
+    final_instr = "Reason briefly, then cast your vote with vote_sheriff (target = player ID) or abstain with pass_turn."
+
+    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, "")
+
+    action = llm.decide_with_tools_sync(
+        state["me_id"], f"{state['phase']}_act",
+        "You are voting for sheriff. Use vote_sheriff with a target player ID, or pass_turn to abstain.",
         full_prompt,
         session_id=state.get("session_id", ""),
     )
@@ -357,7 +431,9 @@ Message: {req.get('message', '')}
 _DECIDERS = {
     "decide_night_role": _decide_night_role,
     "decide_wolf_gesture": _decide_wolf_gesture,
-    "decide_election": _decide_election,
+    "decide_election_signup": _decide_election_signup,
+    "decide_election_speech": _decide_election_speech,
+    "decide_election_vote": _decide_election_vote,
     "decide_discussion": _decide_discussion,
     "decide_vote": _decide_vote,
     "decide_shoot": _decide_shoot,

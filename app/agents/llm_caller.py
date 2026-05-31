@@ -133,6 +133,11 @@ class LLMCaller:
 
         if name == "wolf_kill":
             action["result"] = args.get("reason", f"Kill player {args.get('target', '')}")
+        elif name == "wolf_gesture":
+            gesture = args.get("gesture", "pass")
+            target = args.get("target", "")
+            action["result"] = f"[{gesture}] 目标: {target}" if target else f"[{gesture}]"
+            action["target"] = target or None
         elif name == "seer_check":
             action["result"] = f"Check player {args.get('target', '')}"
         elif name == "witch_heal":
@@ -144,7 +149,8 @@ class LLMCaller:
         elif name == "shoot":
             action["result"] = args.get("reason", f"Shoot player {args.get('target', '')}")
         elif name == "signup_sheriff":
-            action["result"] = args.get("reason", "I want to be sheriff")
+            reason = args.get("reason", "")
+            action["result"] = f"参选上警: {reason}" if reason else "参选上警"
             action["target"] = None
         elif name == "vote_sheriff":
             action["result"] = args.get("reason", f"Vote {args.get('target', '')} for sheriff")
