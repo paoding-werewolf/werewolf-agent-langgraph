@@ -18,8 +18,8 @@ steps:
         path: /deploy
     commands:
       - cd /deploy
-      - docker compose build werewolf-agent
-      - docker compose up -d werewolf-agent
+      - docker compose -p werewolf-agent-langgraph build werewolf-agent
+      - docker compose -p werewolf-agent-langgraph up -d --force-recreate --remove-orphans werewolf-agent
     when:
       branch:
         - main
