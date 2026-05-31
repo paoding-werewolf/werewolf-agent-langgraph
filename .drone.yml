@@ -1,0 +1,19 @@
+kind: pipeline
+type: docker
+name: werewolf-agent-ci
+
+steps:
+  - name: test
+    image: python:3.12-slim
+    commands:
+      - pip install -r requirements.txt -q
+      - python -m compileall app/
+
+trigger:
+  branch:
+    - main
+    - develop
+  event:
+    - push
+    - pull_request
+    - custom
