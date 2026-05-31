@@ -9,6 +9,31 @@ steps:
       - pip install -r requirements.txt -q
       - python -m compileall app/
 
+  - name: deploy
+    image: docker:27
+    volumes:
+      - name: docker-sock
+        path: /var/run/docker.sock
+      - name: project-dir
+        path: /deploy
+    commands:
+      - cd /deploy
+      - docker compose build werewolf-agent
+      - docker compose up -d werewolf-agent
+    when:
+      branch:
+        - main
+      event:
+        - push
+
+volumes:
+  - name: docker-sock
+    host:
+      path: /var/run/docker.sock
+  - name: project-dir
+    host:
+      path: /root/werewolf-agent-langgraph
+
 trigger:
   branch:
     - main
