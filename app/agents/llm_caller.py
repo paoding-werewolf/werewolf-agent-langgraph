@@ -48,13 +48,12 @@ TOOLS = [
             "reason": {"type": "string", "description": "Strategic reason for this target"},
         },
         ["target"]),
-    _fn("wolf_gesture",
-        "Wolf team communication gesture during night phase.",
+    _fn("wolf_chat",
+        "Wolf team private chat during night phase. Send a message to your wolf teammates to discuss strategy.",
         {
-            "gesture": {"type": "string", "description": "Gesture type (point, lowkey, shift, change, agree, pass)"},
-            "target": {"type": "string", "description": "Target player ID for the gesture"},
+            "message": {"type": "string", "description": "Your message to wolf teammates (e.g. discuss kill target, coordinate strategy)"},
         },
-        ["gesture"]),
+        ["message"]),
     _fn("seer_check",
         "Seer night action: check a player's alignment.",
         {"target": {"type": "string", "description": "Player ID to check"}},
@@ -133,11 +132,9 @@ class LLMCaller:
 
         if name == "wolf_kill":
             action["result"] = args.get("reason", f"Kill player {args.get('target', '')}")
-        elif name == "wolf_gesture":
-            gesture = args.get("gesture", "pass")
-            target = args.get("target", "")
-            action["result"] = f"[{gesture}] 目标: {target}" if target else f"[{gesture}]"
-            action["target"] = target or None
+        elif name == "wolf_chat":
+            action["result"] = args.get("message", "...")
+            action["target"] = None
         elif name == "seer_check":
             action["result"] = f"Check player {args.get('target', '')}"
         elif name == "witch_heal":
