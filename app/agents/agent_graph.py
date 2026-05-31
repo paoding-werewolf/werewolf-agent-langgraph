@@ -187,22 +187,43 @@ def _decide_wolf_gesture(state: AgentState) -> AgentState:
     gs = _to_agent_game_state(state)
     req = state.get("request") or {}
 
-    task_guidance = f"""
-[TASK: WOLF TEAM ACTION]
-Current Phase: {req.get('status', state['phase'])}
+    phase = req.get('status', state['phase'])
+    if phase == GP.WOLF_GESTURE:
+        task_guidance = f"""
+[TASK: WOLF TEAM PRIVATE CHAT]
+Current Phase: {phase}
 Message: {req.get('message', '')}
 
-You are in the wolf night phase. Communicate with your wolf teammates.
-Use wolf_gesture for communication or wolf_kill to choose a target.
+You are in the wolf night phase. Chat privately with your wolf teammates.
+Use wolf_chat to send a message (discuss who to kill tonight, coordinate strategy, share suspicions).
 {_THINK_FIRST}
+PROTOCOL:
+- Use wolf_chat to send your message to teammates
+- Discuss strategy: who to target, how to avoid suspicion, which roles you suspect
+- Do NOT use wolf_kill here — this is the communication phase, killing comes next
 """
-    final_instr = "Reason briefly, then choose your action using the appropriate tool in the same reply."
+        final_instr = "Reason briefly, then send your message using wolf_chat in the same reply."
+        sys_msg = "You are a Werewolf chatting with teammates at night. Use wolf_chat to send a message."
+    else:
+        task_guidance = f"""
+[TASK: WOLF KILL]
+Current Phase: {phase}
+Message: {req.get('message', '')}
+
+Choose a player to kill tonight.
+{_THINK_FIRST}
+PROTOCOL:
+- Use wolf_kill with the target player ID
+- Use pass_turn to abstain
+"""
+        final_instr = "Reason briefly, then use wolf_kill to choose your target."
+        sys_msg = "You are a Werewolf choosing a kill target. Use wolf_kill or pass_turn."
 
     full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, "")
 
     action = llm.decide_with_tools_sync(
         state["me_id"], f"{state['phase']}_act",
-        "You are a Werewolf player on the Wolf Team. Use tools to communicate and act.",
+        sys_msg,
         full_prompt,
         session_id=state.get("session_id", ""),
     )
