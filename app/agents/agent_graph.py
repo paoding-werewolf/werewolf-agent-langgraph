@@ -154,11 +154,47 @@ def _route_by_phase(state: AgentState) -> Literal[
     return "decide_generic"
 
 
+def _build_extra_data(state: AgentState, phase: str) -> dict:
+    """组装传入 prompt_builder 的额外数据（记忆 + 进化策略）。"""
+    from memory.self_model import format_self_model_for_prompt
+    from memory.working_memory import WorkingMemory
+
+    extra = {}
+
+    wm_data = state.get("working_memory")
+    if wm_data:
+        wm = WorkingMemory.from_dict(wm_data)
+    else:
+        wm = WorkingMemory(
+            game_id=state.get("room_id", ""),
+            my_role=state["my_role"],
+            my_seat=state["me_id"],
+            day=state.get("day", 1),
+        )
+    extra["working_memory"] = wm
+
+    extra["self_model_text"] = format_self_model_for_prompt()
+
+    try:
+        from evolution.config import load_config
+        from evolution.version_manager import VersionManager
+        cfg = load_config()
+        vm = VersionManager(cfg)
+        extra["evolution_strategies"] = vm.format_skills_for_prompt(
+            state["my_role"], phase
+        )
+    except Exception:
+        pass
+
+    return extra
+
+
 def _decide_night_role(state: AgentState) -> AgentState:
     """Night action for Guard/Seer/Witch."""
     builder = PromptBuilder(Role(state["my_role"]), state["me_id"])
     gs = _to_agent_game_state(state)
     req = state.get("request") or {}
+    extra_data = _build_extra_data(state, "seer_check")
 
     task_guidance = f"""
 [TASK: NIGHT ACTION]
@@ -169,7 +205,7 @@ Message: {req.get('message', '')}
 """
     final_instr = "Reason briefly, then execute your decision with the appropriate tool in the same reply."
 
-    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, "")
+    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, "", extra_data=extra_data)
 
     action = llm.decide_with_tools_sync(
         state["me_id"], f"{state['phase']}_act",
@@ -186,6 +222,7 @@ def _decide_wolf_gesture(state: AgentState) -> AgentState:
     builder = PromptBuilder(Role(state["my_role"]), state["me_id"])
     gs = _to_agent_game_state(state)
     req = state.get("request") or {}
+    extra_data = _build_extra_data(state, "wolf_kill")
 
     phase = req.get('status', state['phase'])
     if phase == GP.WOLF_GESTURE:
@@ -219,7 +256,7 @@ PROTOCOL:
         final_instr = "Reason briefly, then use wolf_kill to choose your target."
         sys_msg = "You are a Werewolf choosing a kill target. Use wolf_kill or pass_turn."
 
-    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, "")
+    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, "", extra_data=extra_data)
 
     action = llm.decide_with_tools_sync(
         state["me_id"], f"{state['phase']}_act",
@@ -236,6 +273,7 @@ def _decide_election_signup(state: AgentState) -> AgentState:
     builder = PromptBuilder(Role(state["my_role"]), state["me_id"])
     gs = _to_agent_game_state(state)
     req = state.get("request") or {}
+    extra_data = _build_extra_data(state, "election")
 
     task_guidance = f"""
 [TASK: SHERIFF ELECTION - SIGNUP]
@@ -252,7 +290,7 @@ PROTOCOL:
 """
     final_instr = "Reason briefly, then call decide_signup with decision=参选 or decision=不参选."
 
-    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, "")
+    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, "", extra_data=extra_data)
 
     action = llm.decide_with_tools_sync(
         state["me_id"], f"{state['phase']}_act",
@@ -269,6 +307,7 @@ def _decide_election_speech(state: AgentState) -> AgentState:
     builder = PromptBuilder(Role(state["my_role"]), state["me_id"])
     gs = _to_agent_game_state(state)
     req = state.get("request") or {}
+    extra_data = _build_extra_data(state, "election")
 
     task_guidance = f"""
 [TASK: SHERIFF ELECTION - SPEECH]
@@ -283,7 +322,7 @@ PROTOCOL:
 """
     final_instr = "Reason briefly, then deliver your speech with the speak tool in the same reply."
 
-    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, "")
+    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, "", extra_data=extra_data)
 
     action = llm.decide_with_tools_sync(
         state["me_id"], f"{state['phase']}_act",
@@ -300,6 +339,7 @@ def _decide_election_vote(state: AgentState) -> AgentState:
     builder = PromptBuilder(Role(state["my_role"]), state["me_id"])
     gs = _to_agent_game_state(state)
     req = state.get("request") or {}
+    extra_data = _build_extra_data(state, "election")
 
     task_guidance = f"""
 [TASK: SHERIFF ELECTION - VOTE]
@@ -315,7 +355,7 @@ PROTOCOL:
 """
     final_instr = "Reason briefly, then call vote_sheriff(target=\"<candidate_id>\") or pass_turn."
 
-    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, "")
+    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, "", extra_data=extra_data)
 
     action = llm.decide_with_tools_sync(
         state["me_id"], f"{state['phase']}_act",
@@ -332,6 +372,7 @@ def _decide_discussion(state: AgentState) -> AgentState:
     builder = PromptBuilder(Role(state["my_role"]), state["me_id"])
     gs = _to_agent_game_state(state)
     req = state.get("request") or {}
+    extra_data = _build_extra_data(state, "discussion")
 
     task_guidance = f"""
 [TASK: DAYTIME DISCUSSION]
@@ -347,7 +388,7 @@ PROTOCOL:
 """
     final_instr = "Reason briefly, then make your statement with the speak tool in the same reply."
 
-    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, "")
+    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, "", extra_data=extra_data)
 
     action = llm.decide_with_tools_sync(
         state["me_id"], f"{state['phase']}_act",
@@ -364,6 +405,7 @@ def _decide_vote(state: AgentState) -> AgentState:
     builder = PromptBuilder(Role(state["my_role"]), state["me_id"])
     gs = _to_agent_game_state(state)
     req = state.get("request") or {}
+    extra_data = _build_extra_data(state, "vote")
 
     task_guidance = f"""
 [TASK: ELIMINATION VOTE]
@@ -379,7 +421,7 @@ PROTOCOL:
 """
     final_instr = "Reason briefly, then cast your vote using the vote tool (or pass_turn to abstain) in the same reply."
 
-    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, "")
+    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, "", extra_data=extra_data)
 
     action = llm.decide_with_tools_sync(
         state["me_id"], f"{state['phase']}_act",
@@ -396,6 +438,7 @@ def _decide_shoot(state: AgentState) -> AgentState:
     builder = PromptBuilder(Role(state["my_role"]), state["me_id"])
     gs = _to_agent_game_state(state)
     req = state.get("request") or {}
+    extra_data = _build_extra_data(state, "shoot_skill")
 
     task_guidance = f"""
 [TASK: SHOOT SKILL]
@@ -411,7 +454,7 @@ PROTOCOL:
 """
     final_instr = "Reason briefly, then use the shoot tool in the same reply."
 
-    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, "")
+    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, "", extra_data=extra_data)
 
     action = llm.decide_with_tools_sync(
         state["me_id"], f"{state['phase']}_act",
@@ -428,6 +471,7 @@ def _decide_generic(state: AgentState) -> AgentState:
     builder = PromptBuilder(Role(state["my_role"]), state["me_id"])
     gs = _to_agent_game_state(state)
     req = state.get("request") or {}
+    extra_data = _build_extra_data(state, state.get("phase", ""))
 
     task_guidance = f"""
 [TASK: DECISION]
@@ -437,7 +481,7 @@ Message: {req.get('message', '')}
 """
     final_instr = "Reason briefly, then use pass_turn if you have nothing to do, or the appropriate tool, in the same reply."
 
-    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, "")
+    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, "", extra_data=extra_data)
 
     action = llm.decide_with_tools_sync(
         state["me_id"], f"{state['phase']}_act",
@@ -502,18 +546,53 @@ def _to_agent_game_state(state: AgentState):
 
 def run_perceive(state: AgentState, request: dict) -> AgentState:
     """Fold an incoming game event into the agent's state. No LLM call."""
-    return _parse_event({**state, "request": request})
+    state = _parse_event({**state, "request": request})
+
+    # Update working memory from the event
+    try:
+        from memory.working_memory import WorkingMemory
+        wm_data = state.get("working_memory")
+        wm = WorkingMemory.from_dict(wm_data) if wm_data else WorkingMemory(
+            game_id=state.get("room_id", ""),
+            my_role=state["my_role"],
+            my_seat=state["me_id"],
+            day=state.get("day", 1),
+        )
+        wm.update_from_event(request)
+        wm.day = state.get("day", 1)
+        state["working_memory"] = wm.to_dict()
+    except Exception:
+        pass
+
+    return state
 
 
 def run_act(state: AgentState, request: dict) -> AgentState:
-    """Route by phase, then run the matching decider in a single LLM call. Blocking.
-
-    Reflection is merged into the decision: the decider prompt asks the model to
-    reason briefly and then emit the action tool call in one response. The reasoning
-    text is surfaced back as ``last_thought`` for observability.
-    """
+    """Route by phase, then run the matching decider in a single LLM call. Blocking."""
     state = {**state, "request": request, "phase": request.get("status", state.get("phase", ""))}
     decider = _DECIDERS[_route_by_phase(state)]
     state = decider(state)
     thought = (state.get("next_action") or {}).get("thought", "")
+
+    # Extract in-game flags from thought
+    try:
+        from evolution.in_game_flagger import InGameFlagger
+        flagger = InGameFlagger()
+        flags = flagger.extract_flags(thought)
+        if flags:
+            existing_flags = list(state.get("in_game_flags", []))
+            existing_flags.extend(flags)
+            state["in_game_flags"] = existing_flags
+
+            # Also update working memory flags
+            wm_data = state.get("working_memory")
+            if wm_data:
+                from memory.working_memory import WorkingMemory
+                wm = WorkingMemory.from_dict(wm_data)
+                for flag in flags:
+                    wm.add_flag(flag)
+                state["working_memory"] = wm.to_dict()
+    except Exception:
+        pass
+
     return {**state, "last_thought": thought}
