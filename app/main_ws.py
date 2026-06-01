@@ -191,6 +191,28 @@ async def handle_connection(ws: ServerConnection):
                     msg.get("round", 1),
                 )
 
+            elif msg_type == "game_over":
+                resp = await _process_game_over(
+                    _route_thread_id(msg, agent_id or ""),
+                    req_id,
+                    msg.get("result", "lost"),
+                    msg.get("winner_role", ""),
+                    msg.get("all_roles", {}),
+                )
+
+            elif msg_type == "buffer_status":
+                resp = await _process_buffer_status(
+                    _route_thread_id(msg, agent_id or ""),
+                    req_id,
+                )
+
+            elif msg_type == "rollback":
+                resp = await _process_rollback(
+                    req_id,
+                    msg.get("skill_name", ""),
+                    msg.get("target_version", ""),
+                )
+
             else:
                 resp = {"type": "error", "req_id": req_id,
                         "detail": f"Unknown message type: {msg_type}"}
@@ -242,6 +264,169 @@ async def process_request(connection: ServerConnection, request: Request):
     return _http_response(
         http.HTTPStatus.OK, render_prompts_html(history), "text/html; charset=utf-8"
     )
+
+
+# ── game_over 处理 ────────────────────────────────────────
+
+async def _process_game_over(session_id: str, req_id: str,
+                              result: str, winner_role: str,
+                              all_roles: dict) -> dict:
+    """对局结束：触发反思 + 记忆更新 + 缓冲池操作。"""
+    state = store.get(session_id)
+    if state is None:
+        return {"type": "error", "req_id": req_id,
+                "detail": "Session not found."}
+
+    asyncio.create_task(_run_post_game_pipeline(
+        state, result, winner_role, all_roles, session_id, req_id
+    ))
+
+    return {"type": "game_over_ack", "req_id": req_id}
+
+
+async def _run_post_game_pipeline(state: dict, result: str,
+                                   winner_role: str, all_roles: dict,
+                                   session_id: str, req_id: str):
+    """对局结束后完整管道：反思 → 缓冲 → 记忆更新。"""
+    try:
+        from evolution.config import load_config, ensure_directories
+        from evolution.reflection_engine import ReflectionEngine, format_game_trace
+        from evolution.buffer_pool import BufferPool
+        from evolution.clustering import SuggestionClusterer
+        from evolution.confirmation import ConfirmationJudge
+        from evolution.version_manager import VersionManager
+        from evolution.in_game_flagger import InGameFlagger
+        from memory.game_archive import save_game, record_strategy_gap
+        from memory.self_model import update_self_model
+        from memory.opponent_model import update_opponent_from_game
+        from agents.llm_caller import llm
+
+        cfg = load_config()
+        if not cfg.enabled:
+            return
+        ensure_directories(cfg)
+
+        # 1. Format trace
+        game_trace = format_game_trace(state.get("events", []), state.get("players", {}))
+
+        # 2. Extract in-game flags
+        flagger = InGameFlagger()
+        flags = flagger.extract_flags(state.get("last_thought", ""))
+        # Also include flags accumulated during the game
+        flags.extend(state.get("in_game_flags", []))
+
+        # 3. Load current strategies
+        vm = VersionManager(cfg)
+        current_strategies = vm.format_skills_for_prompt(
+            state["my_role"], state.get("phase", "")
+        )
+
+        # 4. Execute reflection
+        engine = ReflectionEngine(cfg)
+        reflection = engine.reflect(
+            game_id=state.get("room_id", "unknown"),
+            my_role=state["my_role"],
+            my_seat=state["me_id"],
+            result=result,
+            game_trace=game_trace,
+            in_game_flags=flags,
+            current_strategies=current_strategies,
+        )
+
+        if reflection:
+            # 5. Write to buffer pool
+            pool = BufferPool(cfg)
+            buffer_status = pool.ingest(reflection)
+
+            # 6. Trigger clustering
+            clusterer = SuggestionClusterer(cfg)
+            clusterer.process_pending()
+
+            # 7. Check confirmation
+            judge = ConfirmationJudge(cfg, pool, vm)
+            confirmed = judge.check_all_clusters()
+
+            # 8. Record strategy_gap
+            if reflection.suggestion.match_level in ("low", "strategy_gap"):
+                record_strategy_gap(
+                    reflection.game_id,
+                    f"{reflection.scene_tags.role}_{reflection.scene_tags.critical_phase}"
+                )
+
+            # 9. Archive game
+            import yaml
+            from dataclasses import asdict
+            save_game(
+                game_id=reflection.game_id,
+                my_role=reflection.my_role,
+                result=result,
+                day_count=state.get("day", 1),
+                scene_tags={
+                    "role": reflection.scene_tags.role,
+                    "result": reflection.scene_tags.result,
+                    "wolf_aggression": reflection.scene_tags.wolf_aggression,
+                },
+                reflection_report=yaml.dump(asdict(reflection), allow_unicode=True, default_flow_style=False),
+                full_trace=game_trace,
+                strategies_used=state.get("strategies_used", []),
+            )
+
+        # 10. Update self model
+        update_self_model(
+            my_role=state["my_role"],
+            result=result,
+            key_decisions=state.get("last_thought", ""),
+            llm_caller=llm,
+        )
+
+        # 11. Expire old suggestions
+        pool = BufferPool(cfg)
+        pool.expire_old_suggestions()
+
+        logger.info(f"Post-game pipeline complete for session {session_id}: result={result}")
+    except Exception:
+        logger.exception(f"Post-game pipeline failed for session {session_id}")
+
+
+# ── buffer_status 处理 ────────────────────────────────────
+
+async def _process_buffer_status(session_id: str, req_id: str) -> dict:
+    """返回缓冲池状态。"""
+    try:
+        from evolution.config import load_config
+        from evolution.buffer_pool import BufferPool
+
+        cfg = load_config()
+        pool = BufferPool(cfg)
+        status = pool.get_status()
+
+        return {"type": "buffer_status", "req_id": req_id, **status}
+    except Exception as e:
+        return {"type": "error", "req_id": req_id, "detail": str(e)}
+
+
+# ── rollback 处理 ────────────────────────────────────────
+
+async def _process_rollback(req_id: str, skill_name: str,
+                             target_version: str) -> dict:
+    """回退策略版本。"""
+    try:
+        from evolution.config import load_config
+        from evolution.version_manager import VersionManager
+
+        cfg = load_config()
+        vm = VersionManager(cfg)
+        success = vm.rollback(skill_name, target_version)
+
+        return {
+            "type": "rollback_result",
+            "req_id": req_id,
+            "success": success,
+            "skill_name": skill_name,
+            "target_version": target_version,
+        }
+    except Exception as e:
+        return {"type": "error", "req_id": req_id, "detail": str(e)}
 
 
 async def _cleanup_loop(interval: float):

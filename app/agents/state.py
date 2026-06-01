@@ -27,6 +27,11 @@ class AgentState(TypedDict):
     # Current request from game server
     request: Optional[Dict[str, Any]]
 
+    # Memory & evolution
+    working_memory: Optional[Dict[str, Any]]
+    strategies_used: List[str]
+    in_game_flags: List[Dict[str, Any]]
+
 
 def make_initial_state(agent_id: str) -> AgentState:
     parts = agent_id.split("_")
@@ -59,4 +64,19 @@ def make_initial_state(agent_id: str) -> AgentState:
         "last_thought": "",
         "next_action": None,
         "request": None,
+        "working_memory": {
+            "game_id": "unknown",
+            "my_role": role_val,
+            "my_seat": player_id,
+            "day": 1,
+            "known_info": [],
+            "speeches": {},
+            "actions": [],
+            "my_speeches": {},
+            "contradictions": [],
+            "flags": [],
+            "suspicion": {"高": [], "中": [], "低": []},
+        },
+        "strategies_used": [],
+        "in_game_flags": [],
     }

@@ -45,8 +45,27 @@ class PromptBuilder:
         prompt = self._get_core_task(extra_data)
         prompt += self.get_game_info(state, extra_data)
 
+        # ── Memory injection ──
+        if extra_data and extra_data.get("working_memory"):
+            prompt += "\n---\n" + extra_data["working_memory"].format_for_prompt()
+
+        if extra_data and extra_data.get("opponent_profiles"):
+            from memory.opponent_model import format_opponents_for_prompt
+            prompt += "\n---\n" + format_opponents_for_prompt(extra_data["opponent_profiles"])
+
+        if extra_data and extra_data.get("self_model_text"):
+            prompt += "\n---\n" + extra_data["self_model_text"]
+
+        # ── Evolved strategy injection ──
         if include_thinking_framework:
-            prompt = f"""{prompt}
+            strategy_text = ""
+            if extra_data and extra_data.get("evolution_strategies"):
+                strategy_text = extra_data["evolution_strategies"]
+
+            if strategy_text:
+                prompt += f"\n---\n## Active Strategies (Evolved)\n{strategy_text}\n---"
+
+            prompt += f"""
 
 ---
 This is a thinking framework for the villager role during daytime discussion, for reference only. It may not match your current role or day/night phase. Do not apply it rigidly:
@@ -54,6 +73,10 @@ This is a thinking framework for the villager role during daytime discussion, fo
 {prompt_storage.CRITICAL_THINKING_FRAMEWORK}
 ```
 ---"""
+
+        # ── In-game flag prompt ──
+        from evolution.in_game_flagger import IN_GAME_FLAG_PROMPT
+        prompt += f"\n---\n{IN_GAME_FLAG_PROMPT}\n"
 
         if last_thought:
             prompt += f"\n### Your Previous Reflection\n{last_thought}\n"

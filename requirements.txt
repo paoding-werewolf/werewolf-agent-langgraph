@@ -5,3 +5,4 @@ openai
 pydantic
 httpx
 python-dotenv
+pyyaml>=6.0
