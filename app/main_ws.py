@@ -213,6 +213,13 @@ async def handle_connection(ws: ServerConnection):
                     msg.get("target_version", ""),
                 )
 
+            elif msg_type == "force_confirm":
+                resp = await _process_force_confirm(
+                    _route_thread_id(msg, agent_id or ""),
+                    req_id,
+                    msg.get("cluster_id", ""),
+                )
+
             else:
                 resp = {"type": "error", "req_id": req_id,
                         "detail": f"Unknown message type: {msg_type}"}
@@ -284,6 +291,29 @@ async def _process_game_over(session_id: str, req_id: str,
     return {"type": "game_over_ack", "req_id": req_id}
 
 
+def _extract_player_behavior(state: dict, player_id: str) -> str:
+    events = state.get("events", [])
+    behaviors = []
+    for event in events:
+        content = event.get("content", "")
+        traces = event.get("traces", [])
+        status = event.get("status", "")
+        round_num = event.get("round", 1)
+
+        for t in traces:
+            if t.get("from") == player_id or t.get("to") == player_id:
+                action_desc = f"R{round_num} {status}: {t.get('from','')}->{t.get('to','')}({t.get('action','')})"
+                behaviors.append(action_desc)
+
+        if status == "discussion" and player_id in content:
+            behaviors.append(f"R{round_num} speech: {content[:100]}")
+
+        if status in ("vote", "vote_result") and player_id in content:
+            behaviors.append(f"R{round_num} vote: {content}")
+
+    return "\n".join(behaviors[:20]) if behaviors else ""
+
+
 async def _run_post_game_pipeline(state: dict, result: str,
                                    winner_role: str, all_roles: dict,
                                    session_id: str, req_id: str):
@@ -321,7 +351,18 @@ async def _run_post_game_pipeline(state: dict, result: str,
             state["my_role"], state.get("phase", "")
         )
 
+        # 3.1 Initialize buffer pool (shared for ingest + expire)
+        pool = BufferPool(cfg)
+
         # 4. Execute reflection
+        # 3.5 Format working memory
+        working_memory_text = ""
+        wm_data = state.get("working_memory")
+        if wm_data:
+            from memory.working_memory import WorkingMemory
+            wm = WorkingMemory.from_dict(wm_data)
+            working_memory_text = wm.format_for_prompt()
+
         engine = ReflectionEngine(cfg)
         reflection = engine.reflect(
             game_id=state.get("room_id", "unknown"),
@@ -331,11 +372,11 @@ async def _run_post_game_pipeline(state: dict, result: str,
             game_trace=game_trace,
             in_game_flags=flags,
             current_strategies=current_strategies,
+            working_memory_text=working_memory_text,
         )
 
         if reflection:
             # 5. Write to buffer pool
-            pool = BufferPool(cfg)
             buffer_status = pool.ingest(reflection)
 
             # 6. Trigger clustering
@@ -379,8 +420,29 @@ async def _run_post_game_pipeline(state: dict, result: str,
             llm_caller=llm,
         )
 
+        # 10.1 Update opponent models (Layer 2)
+        from memory.opponent_model import update_opponent_from_game
+        my_seat = state.get("me_id", "")
+        for player_id, player_role in (all_roles or {}).items():
+            if player_id == my_seat:
+                continue
+            behavior_summary = _extract_player_behavior(state, player_id)
+            if behavior_summary:
+                update_opponent_from_game(
+                    player_id=player_id,
+                    role=player_role,
+                    behavior_summary=behavior_summary,
+                    llm_caller=llm,
+                )
+
+        # 10.5 Record version usage for version competition
+        versions_used = state.get("versions_used", {})
+        if versions_used:
+            won = (result == "won")
+            for skill_name, version in versions_used.items():
+                vm.record_usage(skill_name, version, won)
+
         # 11. Expire old suggestions
-        pool = BufferPool(cfg)
         pool.expire_old_suggestions()
 
         logger.info(f"Post-game pipeline complete for session {session_id}: result={result}")
@@ -424,6 +486,57 @@ async def _process_rollback(req_id: str, skill_name: str,
             "success": success,
             "skill_name": skill_name,
             "target_version": target_version,
+        }
+    except Exception as e:
+        return {"type": "error", "req_id": req_id, "detail": str(e)}
+
+
+async def _process_force_confirm(session_id: str, req_id: str,
+                                  cluster_id: str) -> dict:
+    """人工强制确认某个 cluster，跳过防抖阈值检查。"""
+    if not cluster_id:
+        return {"type": "error", "req_id": req_id,
+                "detail": "cluster_id is required"}
+    try:
+        from evolution.config import load_config, ensure_directories
+        from evolution.buffer_pool import BufferPool
+        from evolution.confirmation import ConfirmationJudge
+        from evolution.version_manager import VersionManager
+
+        cfg = load_config()
+        ensure_directories(cfg)
+
+        pool = BufferPool(cfg)
+        cluster = pool.load_cluster(cluster_id)
+        if not cluster:
+            return {"type": "error", "req_id": req_id,
+                    "detail": f"Cluster '{cluster_id}' not found"}
+
+        vm = VersionManager(cfg)
+        judge = ConfirmationJudge(cfg, pool, vm)
+
+        target_skill = cluster.get("target_skill", "")
+        suggestions = cluster.get("suggestions", [])
+        if not target_skill or not suggestions:
+            return {"type": "error", "req_id": req_id,
+                    "detail": "Cluster has no target_skill or suggestions"}
+
+        new_content = judge._synthesize_strategy(suggestions, target_skill)
+        version_name = vm.create_new_version(
+            skill_name=target_skill,
+            content=new_content,
+            source="manual_force_confirm",
+            trigger_cluster=cluster_id,
+        )
+        pool.move_to_confirmed(cluster_id)
+
+        return {
+            "type": "force_confirm_result",
+            "req_id": req_id,
+            "success": True,
+            "cluster_id": cluster_id,
+            "skill_name": target_skill,
+            "new_version": version_name,
         }
     except Exception as e:
         return {"type": "error", "req_id": req_id, "detail": str(e)}

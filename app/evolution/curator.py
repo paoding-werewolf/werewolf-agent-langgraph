@@ -130,6 +130,31 @@ class Curator:
 
             if decision == "keep":
                 result["kept"] += 1
+            elif decision == "patch":
+                patched_content = self._llm_patch_skill(content, usage, review_llm)
+                if patched_content:
+                    with open(v_file, "w") as f:
+                        f.write(patched_content)
+                    result["patched"] += 1
+                else:
+                    result["kept"] += 1
+            elif decision == "consolidate":
+                consolidated = self._llm_consolidate_skill(
+                    skill_dir.name, content, review_llm
+                )
+                if consolidated:
+                    new_version = self.loader.create_new_version(
+                        skill_name=meta.get("skill_name", skill_dir.name),
+                        content=consolidated["content"],
+                        source="curator_consolidation",
+                        trigger_cluster=consolidated.get("merged_with", ""),
+                    )
+                    v_data["status"] = "archived"
+                    with open(meta_path, "w") as f:
+                        json.dump(meta, f, indent=2, ensure_ascii=False)
+                    result["consolidated"] += 1
+                else:
+                    result["kept"] += 1
             elif decision == "archive":
                 v_data["status"] = "archived"
                 result["archived"] += 1
@@ -176,6 +201,102 @@ class Curator:
             pass
         return "keep"
 
+    def _llm_patch_skill(self, content: str, usage: Dict, llm: LLMCaller) -> Optional[str]:
+        """LLM 修补策略文档的瑕疵，返回修补后的完整文档。失败返回 None。"""
+        prompt = f"""修补以下狼人杀策略文档中的瑕疵。
+
+策略内容：
+{content[:3000]}
+
+使用数据：
+- 对局数: {usage.get('games_played', 0)}
+- 胜率: {usage.get('win_rate', 0):.2f}
+
+要求：
+1. 修正明显的逻辑矛盾或表述不清
+2. 保留原有策略的核心思路
+3. 保持原有的 Markdown + YAML frontmatter 格式
+4. 输出修补后的完整文档"""
+
+        try:
+            resp = llm.client.chat.completions.create(
+                model=llm.model,
+                messages=[
+                    {"role": "system", "content": "你是狼人杀策略文档修补专家。输出完整的修补后文档。"},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.2,
+            )
+            result = (resp.choices[0].message.content or "").strip()
+            if len(result) > 50 and "---" in result:
+                return result
+        except Exception:
+            pass
+        return None
+
+    def _llm_consolidate_skill(self, skill_name: str, content: str,
+                                llm: LLMCaller) -> Optional[Dict]:
+        """LLM 将当前策略与重叠策略合并。返回 {"content": str, "merged_with": str} 或 None。"""
+        skill_dir = self.loader._find_skill_dir(skill_name)
+        if not skill_dir:
+            return None
+
+        role_dir = skill_dir.parent
+        sibling_skills = []
+        for sibling in role_dir.iterdir():
+            if sibling.is_dir() and sibling.name != skill_dir.name:
+                sibling_meta_path = sibling / ".versions.json"
+                if sibling_meta_path.exists():
+                    with open(sibling_meta_path) as f:
+                        sibling_meta = json.load(f)
+                    sibling_v = sibling_meta.get("current_default", "v1")
+                    sibling_file = sibling / f"{sibling_v}.md"
+                    if sibling_file.exists():
+                        sibling_content = sibling_file.read_text()
+                        sibling_skills.append({
+                            "name": sibling_meta.get("skill_name", sibling.name),
+                            "content": sibling_content[:1500],
+                        })
+
+        if not sibling_skills:
+            return None
+
+        siblings_text = "\n\n".join(
+            f"### 策略: {s['name']}\n{s['content']}" for s in sibling_skills[:3]
+        )
+
+        prompt = f"""判断以下策略是否与相邻策略有显著重叠，如果有则合并。
+
+当前策略 ({skill_name})：
+{content[:2000]}
+
+相邻策略：
+{siblings_text}
+
+如果存在显著重叠（覆盖相似决策空间），输出合并后的完整策略文档（Markdown + YAML frontmatter）。
+如果没有显著重叠，只回答 "no_merge"。"""
+
+        try:
+            resp = llm.client.chat.completions.create(
+                model=llm.model,
+                messages=[
+                    {"role": "system", "content": "你是策略库策展专家。判断重叠并合并。"},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.2,
+            )
+            result = (resp.choices[0].message.content or "").strip()
+            if "no_merge" in result.lower():
+                return None
+            if len(result) > 50 and "---" in result:
+                return {
+                    "content": result,
+                    "merged_with": ", ".join(s["name"] for s in sibling_skills[:3]),
+                }
+        except Exception:
+            pass
+        return None
+
     def _snapshot(self):
         """创建技能库快照。"""
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -183,8 +304,15 @@ class Curator:
         snapshot_dir.mkdir(parents=True, exist_ok=True)
 
         tar_path = snapshot_dir / "skills.tar.gz"
+        backup_dir_name = self.backup_dir.name
+
+        def _exclude_backups(tarinfo):
+            if backup_dir_name in tarinfo.name:
+                return None
+            return tarinfo
+
         with tarfile.open(str(tar_path), "w:gz") as tar:
-            tar.add(str(self.skills_root), arcname="skills")
+            tar.add(str(self.skills_root), arcname="skills", filter=_exclude_backups)
 
         snapshots = sorted(self.backup_dir.iterdir())
         while len(snapshots) > 5:

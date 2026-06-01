@@ -62,6 +62,7 @@ class EvolutionConfig:
     clustering_model: str = "deepseek-chat"
     reflection_model: str = ""
     in_game_flag_causal_multiplier: float = 1.3
+    medium_match_causal_discount: float = 0.7
     skills_path: str = str(AGENT_HOME / "skills")
 
 
@@ -73,26 +74,38 @@ def load_config() -> EvolutionConfig:
             raw = yaml.safe_load(f) or {}
         dp = raw.get("debounced_policy", {})
         cfg = EvolutionConfig()
-        _merge_dataclass(cfg, dp)
+
         _merge_dataclass(cfg.reflection, dp.get("reflection", {}))
         _merge_dataclass(cfg.buffer, dp.get("buffer", {}))
-        _merge_dataclass(cfg.confirmation, dp.get("confirmation", {}).get("normal", {}))
+
+        normal_cfg = dp.get("confirmation", {}).get("normal", {})
+        fast_cfg = dp.get("confirmation", {}).get("fast_track", {})
+        _merge_dataclass(cfg.confirmation, normal_cfg, prefix="normal_")
+        _merge_dataclass(cfg.confirmation, fast_cfg, prefix="fast_track_")
+
         _merge_dataclass(cfg.versioning, dp.get("versioning", {}))
         _merge_dataclass(cfg.curator, dp.get("curator", {}))
-        # top-level overrides
+
         for k in ("enabled", "clustering_model", "reflection_model",
-                  "in_game_flag_causal_multiplier", "skills_path"):
+                  "in_game_flag_causal_multiplier", "medium_match_causal_discount",
+                  "skills_path"):
             if k in dp:
                 setattr(cfg, k, dp[k])
         return cfg
     return EvolutionConfig()
 
 
-def _merge_dataclass(obj, overrides: dict):
-    """将 dict 中的键值对覆盖到 dataclass 实例上。"""
+def _merge_dataclass(obj, overrides: dict, prefix: str = ""):
+    """将 dict 中的键值对覆盖到 dataclass 实例上。
+
+    prefix 不为空时，会将 overrides 中的 key 加上 prefix 前缀后
+    再在 obj 上查找属性。用于 ConfirmationConfig 这种把 normal/fast_track
+    分组的场景。
+    """
     for k, v in overrides.items():
-        if hasattr(obj, k):
-            setattr(obj, k, v)
+        target_key = f"{prefix}{k}" if prefix else k
+        if hasattr(obj, target_key):
+            setattr(obj, target_key, v)
 
 
 def ensure_directories(cfg: EvolutionConfig):
