@@ -123,7 +123,10 @@ async def _process_act(session_id: str, agent_id: str, req_id: str, status: str,
 
     frames = []
     thought = (result.get("last_thought") or "").strip()
-    if thought:
+    logger.info(f"[DEBUG] last_thought from result: {thought[:100] if thought else '(empty)'}")
+
+    # Filter out error messages from thoughts
+    if thought and not thought.startswith("ERROR:"):
         frames.append({
             "type": "thought",
             "session_id": session_id,

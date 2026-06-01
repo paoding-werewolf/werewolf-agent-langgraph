@@ -229,21 +229,21 @@ class StateMachine:
         """生成标准的游戏流参考时间轴"""
         flow = []
         # 夜晚
-        flow.append({"phase": "night_begin", "name": "Night Falls"})
-        flow.append({"phase": "guard_action", "name": "Guard Protection"})
-        flow.append({"phase": "wolf_kill", "name": "Wolf Kill"})
-        flow.append({"phase": "seer_check", "name": "Seer Check"})
-        flow.append({"phase": "witch_action", "name": "Witch Action"})
-        
+        flow.append({"phase": "night_begin", "name": "天黑"})
+        flow.append({"phase": "guard_action", "name": "守卫保护"})
+        flow.append({"phase": "wolf_kill", "name": "狼人袭击"})
+        flow.append({"phase": "seer_check", "name": "预言家查验"})
+        flow.append({"phase": "witch_action", "name": "女巫行动"})
+
         # 警长竞选 (仅 Day 1)
-        flow.append({"phase": "election", "name": "Sheriff Election", "day_limit": 1})
-        
-        flow.append({"phase": "dawn_report", "name": "Night Result"})
-        
+        flow.append({"phase": "election", "name": "警长竞选", "day_limit": 1})
+
+        flow.append({"phase": "dawn_report", "name": "夜晚结果"})
+
         # 白天
-        flow.append({"phase": "discussion", "name": "Daytime Discussion"})
-        flow.append({"phase": "vote", "name": "Daytime Exile Vote"})
-        flow.append({"phase": "last_words", "name": "Last Words"})
+        flow.append({"phase": "discussion", "name": "白天发言"})
+        flow.append({"phase": "vote", "name": "放逐投票"})
+        flow.append({"phase": "last_words", "name": "遗言"})
         return flow
 
     def check_skip(self, phase: str) -> bool:
@@ -261,7 +261,7 @@ class StateMachine:
         transition = PHASE_TRANSITIONS.get(self._current_phase)
         if not transition:
             raise ValueError(
-                f"No transition defined for phase: {self._current_phase}"
+                f"未定义阶段的转移: {self._current_phase}"
             )
 
         next_p = transition(self._state)
