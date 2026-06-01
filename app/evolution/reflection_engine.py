@@ -82,6 +82,9 @@ REFLECT_USER_TEMPLATE = """## 对局信息
 ## 对局中的即时标记（如果有）
 {in_game_flags}
 
+## 工作记忆（本局积累的结构化信息）
+{working_memory_text}
+
 ## 当前使用的策略
 {current_strategies}
 
@@ -142,7 +145,8 @@ class ReflectionEngine:
                 result: str,
                 game_trace: str,
                 in_game_flags: List[Dict],
-                current_strategies: str = "") -> Optional[ReflectionResult]:
+                current_strategies: str = "",
+                working_memory_text: str = "") -> Optional[ReflectionResult]:
         """执行对局后反思。"""
         flags_text = json.dumps(in_game_flags, ensure_ascii=False, indent=2) if in_game_flags else "（无即时标记）"
 
@@ -153,6 +157,7 @@ class ReflectionEngine:
             result=result,
             game_trace=game_trace,
             in_game_flags=flags_text,
+            working_memory_text=working_memory_text or "（无工作记忆）",
             current_strategies=current_strategies or "（无策略文档）",
         )
 
@@ -185,7 +190,7 @@ class ReflectionEngine:
             )
 
         if suggestion.match_level == "medium":
-            suggestion.causal_strength *= 0.7
+            suggestion.causal_strength *= self.cfg.medium_match_causal_discount
 
         return ReflectionResult(
             suggestion_id=suggestion_id,

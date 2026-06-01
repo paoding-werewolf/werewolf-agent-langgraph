@@ -30,6 +30,7 @@ class AgentState(TypedDict):
     # Memory & evolution
     working_memory: Optional[Dict[str, Any]]
     strategies_used: List[str]
+    versions_used: Dict[str, str]
     in_game_flags: List[Dict[str, Any]]
 
 
@@ -78,5 +79,6 @@ def make_initial_state(agent_id: str) -> AgentState:
             "suspicion": {"高": [], "中": [], "低": []},
         },
         "strategies_used": [],
+        "versions_used": {},
         "in_game_flags": [],
     }

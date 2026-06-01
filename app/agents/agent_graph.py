@@ -175,6 +175,17 @@ def _build_extra_data(state: AgentState, phase: str) -> dict:
 
     extra["self_model_text"] = format_self_model_for_prompt()
 
+    # 对手画像
+    try:
+        from memory.opponent_model import load_opponents_for_table
+        player_ids = list(state.get("players", {}).keys())
+        my_seat = state.get("me_id", "")
+        opponent_ids = [pid for pid in player_ids if pid != my_seat]
+        if opponent_ids:
+            extra["opponent_profiles"] = load_opponents_for_table(opponent_ids)
+    except Exception:
+        pass
+
     try:
         from evolution.config import load_config
         from evolution.version_manager import VersionManager
@@ -183,6 +194,18 @@ def _build_extra_data(state: AgentState, phase: str) -> dict:
         extra["evolution_strategies"] = vm.format_skills_for_prompt(
             state["my_role"], phase
         )
+
+        versions_used = {}
+        skill_names = []
+        index = vm.loader.load_index()
+        for skill in index:
+            if skill.get("role") in (state["my_role"], "common"):
+                skill_name = skill["name"]
+                version = vm.get_version_for_game(skill_name)
+                versions_used[skill_name] = version
+                skill_names.append(skill_name)
+        extra["versions_used"] = versions_used
+        extra["strategies_available"] = skill_names
     except Exception:
         pass
 
@@ -592,6 +615,19 @@ def run_act(state: AgentState, request: dict) -> AgentState:
                 for flag in flags:
                     wm.add_flag(flag)
                 state["working_memory"] = wm.to_dict()
+    except Exception:
+        pass
+
+    try:
+        ed = _build_extra_data(state, state.get("phase", ""))
+        vu = ed.get("versions_used", {})
+        if vu:
+            state = {**state, "versions_used": vu}
+        sa = ed.get("strategies_available", [])
+        if sa:
+            su = set(state.get("strategies_used", []))
+            su.update(sa)
+            state = {**state, "strategies_used": list(su)}
     except Exception:
         pass
 

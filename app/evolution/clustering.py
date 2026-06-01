@@ -107,8 +107,9 @@ class SuggestionClusterer:
 
     def _scene_tag_overlap(self, tags_a: Dict, tags_b: Dict) -> float:
         """计算两组场景标签的相似度（0-1）。"""
-        key_fields = ["role", "critical_phase", "wolf_aggression", "result",
-                       "sheriff_contested", "first_night_target"]
+        key_fields = ["role", "role_survived_rounds", "critical_phase",
+                       "wolf_aggression", "result", "sheriff_contested",
+                       "first_night_target"]
         match_count = 0
         total = len(key_fields)
 

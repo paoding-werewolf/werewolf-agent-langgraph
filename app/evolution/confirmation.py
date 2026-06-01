@@ -50,21 +50,30 @@ class ConfirmationJudge:
 
         cfm = self.cfg.confirmation
 
-        # 快速通道：高因果强度
+        # 快速通道：高因果强度 + 方向一致
         if avg_causal >= cfm.fast_track_min_causal_strength:
-            if count >= cfm.fast_track_min_count:
+            if count >= cfm.fast_track_min_count and consistency >= cfm.normal_min_consistency_rate:
                 return {
                     "confirmed": True,
-                    "reason": f"Fast track: causal={avg_causal:.2f} >= {cfm.fast_track_min_causal_strength}, count={count} >= {cfm.fast_track_min_count}",
+                    "reason": (
+                        f"Fast track: causal={avg_causal:.2f} >= {cfm.fast_track_min_causal_strength}, "
+                        f"count={count} >= {cfm.fast_track_min_count}, "
+                        f"consistency={consistency:.2f} >= {cfm.normal_min_consistency_rate}"
+                    ),
                     "count": count,
                     "consistency_rate": consistency,
                     "avg_causal_strength": avg_causal,
                     "fast_track": True,
                 }
             else:
+                reasons = []
+                if count < cfm.fast_track_min_count:
+                    reasons.append(f"count={count}<{cfm.fast_track_min_count}")
+                if consistency < cfm.normal_min_consistency_rate:
+                    reasons.append(f"consistency={consistency:.2f}<{cfm.normal_min_consistency_rate}")
                 return {
                     "confirmed": False,
-                    "reason": f"Fast track eligible but count={count} < {cfm.fast_track_min_count}",
+                    "reason": f"Fast track eligible but {', '.join(reasons)}",
                     "count": count,
                     "consistency_rate": consistency,
                     "avg_causal_strength": avg_causal,
