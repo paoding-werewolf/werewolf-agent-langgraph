@@ -17,7 +17,7 @@ checkpointer = MemorySaver()
 # ============================================================
 
 def _parse_event(state: AgentState) -> AgentState:
-    """Process incoming ActRequest as a game event, updating state."""
+    """将传入的 ActRequest 作为游戏事件处理，更新状态。"""
     req = state.get("request")
     if not req:
         return state
@@ -70,7 +70,7 @@ def _parse_event(state: AgentState) -> AgentState:
         trace_to = str(trace.get("to", ""))
         action = trace.get("action", "")
         if action == "wolf_kill" and trace_to in players:
-            players[trace_to]["notes"] = "was attacked"
+            players[trace_to]["notes"] = "遭到攻击"
         elif action == "seer_wolf" and trace_to in players:
             players[trace_to]["role"] = "wolf"
         elif action == "seer_good" and trace_to in players:
@@ -111,16 +111,16 @@ perceive_graph_compiled = perceive_graph.compile(checkpointer=checkpointer)
 # ============================================================
 
 def _reflect_node(state: AgentState) -> AgentState:
-    """AI internal reflection: analyze the game state and form thoughts."""
+    """AI 内部反思：分析游戏状态并形成思路。"""
     builder = PromptBuilder(Role(state["my_role"]), state["me_id"])
 
     task_guidance = """
-[TASK: CRITICAL REFLECTION]
-1. Scan the Game Progress Timeline. Identify logical contradictions.
-2. Who is the most suspicious Wolf? Who are the confirmed Gods?
-3. What is your current stance? Are you being suspected? How will you defend?
+[任务：关键反思]
+1. 浏览游戏进度时间线，找出逻辑矛盾。
+2. 谁是最可疑的狼人？谁是已确认的神职？
+3. 你目前的立场是什么？你是否被怀疑？你将如何辩护？
 """
-    final_instr = "Output your internal monologue. Be concise and logical."
+    final_instr = "输出你的内心独白。请简洁且有逻辑。"
 
     gs = _to_agent_game_state(state)
     full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, "")
@@ -128,7 +128,7 @@ def _reflect_node(state: AgentState) -> AgentState:
     reflection = llm.call_with_log_sync(
         state["me_id"],
         f"{state['phase']}_reflect",
-        "You are a Werewolf Logic Master. Focus on reasoning.",
+        "你是一名狼人杀逻辑大师。专注于推理。",
         full_prompt,
     )
 
@@ -139,7 +139,7 @@ def _route_by_phase(state: AgentState) -> Literal[
     "decide_night_role", "decide_wolf_gesture", "decide_election",
     "decide_discussion", "decide_vote", "decide_shoot", "decide_generic",
 ]:
-    """Conditional routing based on game phase group."""
+    """基于游戏阶段组的条件路由。"""
     phase = state.get("phase", "")
     phase_cfg = PHASE_CONFIG.get(phase, {})
     group = phase_cfg.get("group", "")
@@ -174,28 +174,28 @@ def _route_by_phase(state: AgentState) -> Literal[
 
 
 def _decide_night_role(state: AgentState) -> AgentState:
-    """Night action for Guard/Seer/Witch."""
+    """守卫/预言家/女巫的夜间行动。"""
     builder = PromptBuilder(Role(state["my_role"]), state["me_id"])
     gs = _to_agent_game_state(state)
     req = state.get("request") or {}
 
     task_guidance = f"""
-[TASK: NIGHT ACTION]
-Current Phase: {req.get('status', state['phase'])}
-Message: {req.get('message', '')}
+[任务: 夜间行动]
+当前阶段: {req.get('status', state['phase'])}
+消息: {req.get('message', '')}
 
-Based on your internal monologue:
+基于你的内心独白：
 {state['last_thought']}
 
-Choose the appropriate night action for your role.
+选择适合你角色的夜间行动。
 """
-    final_instr = "Output your decision using the appropriate tool."
+    final_instr = "使用适当的工具输出你的决策。"
 
     full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, state["last_thought"])
 
     action = llm.decide_with_tools_sync(
         state["me_id"], f"{state['phase']}_act",
-        "You are a decisive Werewolf player. Use the tools provided.",
+        "你是一名果断的狼人杀玩家。使用提供的工具。",
         full_prompt,
     )
 
@@ -203,29 +203,29 @@ Choose the appropriate night action for your role.
 
 
 def _decide_wolf_gesture(state: AgentState) -> AgentState:
-    """Wolf team communication at night."""
+    """狼人夜间交流。"""
     builder = PromptBuilder(Role(state["my_role"]), state["me_id"])
     gs = _to_agent_game_state(state)
     req = state.get("request") or {}
 
     task_guidance = f"""
-[TASK: WOLF TEAM ACTION]
-Current Phase: {req.get('status', state['phase'])}
-Message: {req.get('message', '')}
+[任务：狼人团队行动]
+当前阶段： {req.get('status', state['phase'])}
+消息： {req.get('message', '')}
 
-You are in the wolf night phase. Communicate with your wolf teammates.
-Use wolf_gesture for communication or wolf_kill to choose a target.
+你正处于狼人夜间阶段。与你的狼人队友交流。
+使用 wolf_gesture 进行交流或使用 wolf_kill 选择目标。
 
-Previous reflection:
+之前的反思：
 {state['last_thought']}
 """
-    final_instr = "Choose your action using the appropriate tool."
+    final_instr = "使用适当的工具选择你的行动。"
 
     full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, state["last_thought"])
 
     action = llm.decide_with_tools_sync(
         state["me_id"], f"{state['phase']}_act",
-        "You are a Werewolf player on the Wolf Team. Use tools to communicate and act.",
+        "你是狼人阵营的玩家。使用工具进行交流并执行行动。",
         full_prompt,
     )
 
@@ -233,27 +233,27 @@ Previous reflection:
 
 
 def _decide_election(state: AgentState) -> AgentState:
-    """Sheriff election decisions."""
+    """警长选举决策。"""
     builder = PromptBuilder(Role(state["my_role"]), state["me_id"])
     gs = _to_agent_game_state(state)
     req = state.get("request") or {}
 
     task_guidance = f"""
-[TASK: SHERIFF ELECTION]
-Current Phase: {req.get('status', state['phase'])}
-Message: {req.get('message', '')}
+[任务：警长选举]
+当前阶段： {req.get('status', state['phase'])}
+消息： {req.get('message', '')}
 
-Decide whether to sign up for sheriff or vote for a candidate.
-Your previous reflection:
+决定是否报名竞选警长或投票给候选人。
+你之前的反思：
 {state['last_thought']}
 """
-    final_instr = "Use signup_sheriff, vote_sheriff, or pass_turn."
+    final_instr = "使用 signup_sheriff、vote_sheriff 或 pass_turn。"
 
     full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, state["last_thought"])
 
     action = llm.decide_with_tools_sync(
         state["me_id"], f"{state['phase']}_act",
-        "You are a Werewolf player. Decide your election action using available tools.",
+        "你是狼人杀玩家。使用可用工具决定你的竞选行动。",
         full_prompt,
     )
 
@@ -261,33 +261,33 @@ Your previous reflection:
 
 
 def _decide_discussion(state: AgentState) -> AgentState:
-    """Daytime discussion: speak and analyze."""
+    """白天讨论：发言和分析。"""
     builder = PromptBuilder(Role(state["my_role"]), state["me_id"])
     gs = _to_agent_game_state(state)
     req = state.get("request") or {}
 
     task_guidance = f"""
-[TASK: DAYTIME DISCUSSION]
-Current Phase: {req.get('status', state['phase'])}
-Message: {req.get('message', '')}
+[任务：白天讨论]
+当前阶段： {req.get('status', state['phase'])}
+消息： {req.get('message', '')}
 
-Your internal monologue:
+你的内心独白：
 {state['last_thought']}
 
-Speak to the village. Share your analysis, point out suspects, defend yourself or allies.
-Remember: be strategic, not emotional. Good wolves hide; good villagers find them.
+向全场玩家发言。分享你的分析、指出嫌疑人、为自己或盟友辩护。
+记住：要策略性，不要情绪化。好的狼人隐藏身份；好的村民找出狼人。
 
-PROTOCOL:
-- Use speak tool for your speech
-- If you have nothing useful to add, use pass_turn
+行动规则：
+- 使用 speak 工具进行发言
+- 如果没有有用的内容可补充，使用 pass_turn
 """
-    final_instr = "Make your statement."
+    final_instr = "进行你的发言。"
 
     full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, state["last_thought"])
 
     action = llm.decide_with_tools_sync(
         state["me_id"], f"{state['phase']}_act",
-        "You are a Werewolf player in daytime discussion. Use speak or pass_turn.",
+        "你是处于白天讨论阶段的狼人杀玩家。使用 speak 或 pass_turn。",
         full_prompt,
     )
 
@@ -295,32 +295,32 @@ PROTOCOL:
 
 
 def _decide_vote(state: AgentState) -> AgentState:
-    """Elimination vote phase."""
+    """放逐投票阶段。"""
     builder = PromptBuilder(Role(state["my_role"]), state["me_id"])
     gs = _to_agent_game_state(state)
     req = state.get("request") or {}
 
     task_guidance = f"""
-[TASK: ELIMINATION VOTE]
-Current Phase: {req.get('status', state['phase'])}
-Message: {req.get('message', '')}
+[任务：放逐投票]
+当前阶段： {req.get('status', state['phase'])}
+消息： {req.get('message', '')}
 
-You must vote to eliminate a player (or pass/abstain).
-Your analysis:
+你必须投票放逐一名玩家（或跳过/弃权）。
+你的分析：
 {state['last_thought']}
 
-PROTOCOL:
-- Use vote tool with target and reason
-- Wolves: protect your teammates, bus if necessary
-- Villagers: follow your most trusted player's lead
+行动规则：
+- 使用 vote 工具选择目标并说明理由
+- 狼人：保护你的队友，必要时可出卖队友
+- 村民：跟随你最信任的玩家
 """
-    final_instr = "Cast your vote using the vote tool (or pass_turn to abstain)."
+    final_instr = "使用 vote 工具进行投票（或使用 pass_turn 弃权）。"
 
     full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, state["last_thought"])
 
     action = llm.decide_with_tools_sync(
         state["me_id"], f"{state['phase']}_act",
-        "You are a Werewolf player voting to eliminate. Use vote or pass_turn.",
+        "你是正在进行放逐投票的狼人杀玩家。使用 vote 或 pass_turn。",
         full_prompt,
     )
 
@@ -328,31 +328,31 @@ PROTOCOL:
 
 
 def _decide_shoot(state: AgentState) -> AgentState:
-    """Shoot skill for Hunter / Wolf King."""
+    """猎人/狼王的开枪技能。"""
     builder = PromptBuilder(Role(state["my_role"]), state["me_id"])
     gs = _to_agent_game_state(state)
     req = state.get("request") or {}
 
     task_guidance = f"""
-[TASK: SHOOT SKILL]
-Current Phase: {req.get('status', state['phase'])}
-Message: {req.get('message', '')}
+[任务：开枪技能]
+当前阶段： {req.get('status', state['phase'])}
+消息： {req.get('message', '')}
 
-You are dying. Use your shoot skill to take someone with you (or pass).
+你即将出局。使用开枪技能带走一名玩家（或跳过）。
 {state['last_thought']}
 
-PROTOCOL:
-- Use shoot tool with target (or "pass" to not shoot)
-- Hunter: take down a wolf if you know who
-- Wolf King: take down a key good player
+行动规则：
+- 使用 shoot 工具选择目标（或选择 "pass" 不开枪）
+- 猎人：如果你知道谁是狼人，带走他
+- 狼王：带走关键的好人玩家
 """
-    final_instr = "Use the shoot tool."
+    final_instr = "使用 shoot 工具。"
 
     full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, state["last_thought"])
 
     action = llm.decide_with_tools_sync(
         state["me_id"], f"{state['phase']}_act",
-        "You are using your shoot skill. Use shoot or pass_turn.",
+        "你正在使用开枪技能。使用 shoot 或 pass_turn。"
         full_prompt,
     )
 
@@ -360,31 +360,31 @@ PROTOCOL:
 
 
 def _decide_generic(state: AgentState) -> AgentState:
-    """Fallback decision for phases without specific handling."""
+    """没有特定处理阶段的回退决策。"""
     builder = PromptBuilder(Role(state["my_role"]), state["me_id"])
     gs = _to_agent_game_state(state)
     req = state.get("request") or {}
 
     task_guidance = f"""
-[TASK: DECISION]
-Current Phase: {req.get('status', state['phase'])}
-Message: {req.get('message', '')}
+[任务：决策]
+当前阶段： {req.get('status', state['phase'])}
+消息： {req.get('message', '')}
 {state['last_thought']}
 """
-    final_instr = "Use pass_turn if you have nothing to do, or speak/generic action."
+    final_instr = "如果没有要执行的操作，请使用 pass_turn，或者使用 speak/通用动作。"
 
     full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, state["last_thought"])
 
     action = llm.decide_with_tools_sync(
         state["me_id"], f"{state['phase']}_act",
-        "You are a Werewolf player. Use available tools.",
+        "你是狼人杀玩家。使用可用工具。",
         full_prompt,
     )
 
     return {**state, "next_action": action}
 
 
-# ---- Act Graph Construction ----
+# ---- 行动图构建 ----
 act_graph = StateGraph(AgentState)
 
 act_graph.add_node("reflect", _reflect_node)
@@ -418,11 +418,11 @@ act_graph_compiled = act_graph.compile(checkpointer=checkpointer)
 
 
 # ============================================================
-# Helpers — bridge old dataclass types for PromptBuilder compat
+# 辅助函数 — 桥接旧的数据类类型以兼容 PromptBuilder
 # ============================================================
 
 def _to_agent_game_state(state: AgentState):
-    """Convert dict AgentState to AgentGameState dataclass for PromptBuilder."""
+    """将字典类型的 AgentState 转换为 PromptBuilder 兼容的 AgentGameState 数据类。"""
     from core.game_state import AgentGameState, PlayerPerception
 
     players = {}
@@ -430,7 +430,7 @@ def _to_agent_game_state(state: AgentState):
         role_val = pdata.get("role")
         players[pid] = PlayerPerception(
             id=pdata.get("id", pid),
-            name=pdata.get("name", f"Player {pid}"),
+            name=pdata.get("name", f"玩家 {pid}"),
             role=Role(role_val) if role_val else None,
             is_alive=pdata.get("is_alive", True),
             is_sheriff=pdata.get("is_sheriff", False),
@@ -451,11 +451,11 @@ def _to_agent_game_state(state: AgentState):
 
 
 # ============================================================
-# Graph API
+# 图 API
 # ============================================================
 
 async def perceive(agent_id: str, request: dict) -> AgentState:
-    """Process a game event through the perceive graph."""
+    """通过感知图处理游戏事件。"""
     config = {"configurable": {"thread_id": agent_id}}
     initial = make_initial_state(agent_id)
     input_state = {**initial, "request": request}
@@ -464,10 +464,10 @@ async def perceive(agent_id: str, request: dict) -> AgentState:
 
 
 async def act(agent_id: str, request: dict) -> dict:
-    """Make a game decision through the act graph."""
+    """通过行动图做出游戏决策。"""
     config = {"configurable": {"thread_id": agent_id}}
 
-    # Try to get existing state from checkpoint; fallback to initial
+    # 尝试从检查点获取现有状态；否则回退到初始状态
     existing = await perceive_graph_compiled.aget_state(config)
     if existing and existing.values:
         base_state = existing.values
