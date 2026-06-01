@@ -77,10 +77,10 @@ TOOLS = [
             "reason": {"type": "string", "description": "Reason for this shot"},
         },
         ["target"]),
-    _fn("signup_sheriff",
-        "Sign up for sheriff election.",
-        {"reason": {"type": "string", "description": "Why you should be sheriff"}},
-        []),
+    _fn("decide_signup",
+        "Decide whether to run for sheriff. You MUST call this tool with your decision.",
+        {"decision": {"type": "string", "enum": ["参选", "不参选"], "description": "参选 = run for sheriff, 不参选 = decline"}},
+        ["decision"]),
     _fn("vote_sheriff",
         "Vote for a sheriff candidate.",
         {
@@ -145,12 +145,11 @@ class LLMCaller:
             action["result"] = f"Protect player {args.get('target', '')}"
         elif name == "shoot":
             action["result"] = args.get("reason", f"Shoot player {args.get('target', '')}")
-        elif name == "signup_sheriff":
-            reason = args.get("reason", "")
-            action["result"] = f"参选上警: {reason}" if reason else "参选上警"
+        elif name == "decide_signup":
+            action["result"] = args.get("decision", "不参选")
             action["target"] = None
         elif name == "vote_sheriff":
-            action["result"] = args.get("reason", f"Vote {args.get('target', '')} for sheriff")
+            action["result"] = args.get("target", "")
 
         return action
 

@@ -245,17 +245,18 @@ Message: {req.get('message', '')}
 Decide whether YOU want to run for sheriff (上警).
 {_THINK_FIRST}
 PROTOCOL:
-- Use signup_sheriff if you want to run for sheriff
-- Use pass_turn if you do NOT want to run
-- Do NOT use vote_sheriff here — this is the signup phase, not voting
+- You MUST call decide_signup with your decision
+- decision="参选" if you want to run for sheriff
+- decision="不参选" if you do NOT want to run
+- Do NOT use any other tool here
 """
-    final_instr = "Reason briefly, then use signup_sheriff (to run) or pass_turn (to decline) in the same reply."
+    final_instr = "Reason briefly, then call decide_signup with decision=参选 or decision=不参选."
 
     full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, "")
 
     action = llm.decide_with_tools_sync(
         state["me_id"], f"{state['phase']}_act",
-        "You are a Werewolf player deciding whether to run for sheriff. Use signup_sheriff or pass_turn.",
+        "You MUST call decide_signup. decision=参选 to run, decision=不参选 to decline. No other tools.",
         full_prompt,
         session_id=state.get("session_id", ""),
     )
@@ -305,14 +306,14 @@ def _decide_election_vote(state: AgentState) -> AgentState:
 Current Phase: {req.get('status', state['phase'])}
 Message: {req.get('message', '')}
 
-You must vote for one of the sheriff candidates. Pick the player ID you trust most.
+Vote for ONE of the sheriff candidates listed above. The candidate IDs are in the Message.
 {_THINK_FIRST}
 PROTOCOL:
-- Use vote_sheriff with the target player ID to cast your vote
+- Use vote_sheriff with target = candidate's numeric ID (e.g. "3")
+- ONLY vote for a candidate listed in the Message — voting for non-candidates is wasted
 - Use pass_turn to abstain
-- Do NOT use signup_sheriff here — this is the voting phase
 """
-    final_instr = "Reason briefly, then cast your vote with vote_sheriff (target = player ID) or abstain with pass_turn."
+    final_instr = "Reason briefly, then call vote_sheriff(target=\"<candidate_id>\") or pass_turn."
 
     full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, "")
 
