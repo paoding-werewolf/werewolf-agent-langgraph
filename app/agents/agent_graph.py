@@ -352,7 +352,7 @@ def _decide_shoot(state: AgentState) -> AgentState:
 
     action = llm.decide_with_tools_sync(
         state["me_id"], f"{state['phase']}_act",
-        "你正在使用开枪技能。使用 shoot 或 pass_turn。"
+        "你正在使用开枪技能。使用 shoot 或 pass_turn。",
         full_prompt,
     )
 
