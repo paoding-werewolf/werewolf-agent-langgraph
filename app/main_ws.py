@@ -44,6 +44,12 @@ from websockets.asyncio.server import ServerConnection
 from websockets.datastructures import Headers
 from websockets.http11 import Request, Response
 
+try:
+    from aiohttp import web as aiohttp_web
+    HAS_AIOHTTP = True
+except ImportError:
+    HAS_AIOHTTP = False
+
 # 复用现有的 agent 核心逻辑
 from agents.agent_graph import run_perceive, run_act
 from agents.session_store import SessionStore
@@ -202,6 +208,7 @@ async def handle_connection(ws: ServerConnection):
                     msg.get("result", "lost"),
                     msg.get("winner_role", ""),
                     msg.get("all_roles", {}),
+                    msg.get("skip_evolution", False),
                 )
 
             elif msg_type == "buffer_status":
@@ -281,12 +288,17 @@ async def process_request(connection: ServerConnection, request: Request):
 
 async def _process_game_over(session_id: str, req_id: str,
                               result: str, winner_role: str,
-                              all_roles: dict) -> dict:
+                              all_roles: dict,
+                              skip_evolution: bool = False) -> dict:
     """对局结束：触发反思 + 记忆更新 + 缓冲池操作。"""
     state = store.get(session_id)
     if state is None:
         return {"type": "error", "req_id": req_id,
                 "detail": "Session not found."}
+
+    if skip_evolution:
+        logger.info(f"Session {session_id}: skip_evolution=True (builtin AI in game), skipping post-game pipeline.")
+        return {"type": "game_over_ack", "req_id": req_id, "skip_evolution": True}
 
     asyncio.create_task(_run_post_game_pipeline(
         state, result, winner_role, all_roles, session_id, req_id
@@ -454,6 +466,115 @@ async def _run_post_game_pipeline(state: dict, result: str,
         logger.exception(f"Post-game pipeline failed for session {session_id}")
 
 
+# ── HTTP 兼容端点 ──────────────────────────────────────────
+#
+# 与 WS 协议共享同一套处理逻辑 (_process_*), 让 HttpAgentClient / WisAgentClient
+# 等纯 HTTP 客户端也能对接本服务。HTTP 与 WS 共享同一个 SessionStore。
+
+async def _http_agent_info(request):
+    """GET /agent/info — 探测端点, 返回模型名/版本/健康状态。"""
+    return aiohttp_web.json_response({
+        "model": "werewolf-agent-langgraph",
+        "version": "2.0",
+        "name": "Werewolf Agent (WS+HTTP)",
+        "protocols": ["ws", "http"],
+    })
+
+
+async def _http_health(request):
+    """GET /health — 健康检查。"""
+    return aiohttp_web.json_response({"status": "ok"})
+
+
+async def _http_agent_init(request):
+    """POST /agent/init — 初始化 agent 会话。
+
+    兼容两种请求格式:
+    - HttpAgentClient: {"agent_id": "..."}
+    - WisAgentClient:    {"agent_id": "...", "name": "...", "role": "..."}
+    """
+    data = await request.json()
+    agent_id = data.get("agent_id", "")
+    role = data.get("role", "villager")
+    teammates_str = data.get("teammates", "")
+    teammates = [t.strip() for t in teammates_str.split(",") if t.strip()] if teammates_str else []
+
+    _sid, resp = await _process_init(agent_id, role, teammates, "http-0")
+    return aiohttp_web.json_response(resp)
+
+
+async def _http_agent_perceive(request):
+    """POST /agent/perceive — 感知事件 (fire-and-forget)。"""
+    data = await request.json()
+    session_id = data.get("session_id") or data.get("agent_id", "")
+    resp = await _process_perceive(
+        session_id,
+        "http-0",
+        data.get("status", ""),
+        data.get("message", ""),
+        data.get("round", 1),
+        data.get("traces", []),
+    )
+    return aiohttp_web.json_response(resp)
+
+
+async def _http_agent_act(request):
+    """POST /agent/act — 行动请求, 同步返回决策结果。
+
+    兼容两种请求格式:
+    - HttpAgentClient: {"agent_id": "...", "status": "...", "message": "...", ...}
+    - WisAgentClient:  {"name": "...", "status": "...", "message": "...", "role": "...", ...}
+    """
+    data = await request.json()
+    session_id = data.get("session_id") or data.get("agent_id") or data.get("name", "")
+
+    frames = await _process_act(
+        session_id,
+        data.get("agent_id") or data.get("name", ""),
+        "http-0",
+        data.get("status", ""),
+        data.get("message", ""),
+        data.get("round", 1),
+    )
+
+    # 从返回帧中提取 act_result (跳过 thought 帧)
+    for frame in frames:
+        if frame.get("type") == "act_result":
+            return aiohttp_web.json_response(frame)
+    # fallback: 如果没找到 act_result, 返回错误
+    return aiohttp_web.json_response(
+        {"type": "error", "detail": "No action result returned"}, status=500
+    )
+
+
+async def _http_agent_game_over(request):
+    """POST /agent/game_over — 对局结束通知。"""
+    data = await request.json()
+    session_id = data.get("session_id") or data.get("agent_id", "")
+    resp = await _process_game_over(
+        session_id,
+        "http-0",
+        data.get("result", "lost"),
+        data.get("winner_role", ""),
+        data.get("all_roles", {}),
+        data.get("skip_evolution", False),
+    )
+    return aiohttp_web.json_response(resp)
+
+
+def _create_http_app():
+    """创建 aiohttp HTTP 应用, 注册所有兼容端点。"""
+    app = aiohttp_web.Application()
+    app.router.add_get("/agent/info", _http_agent_info)
+    app.router.add_get("/health", _http_health)
+    app.router.add_get("/", _http_health)
+    app.router.add_post("/agent/init", _http_agent_init)
+    app.router.add_post("/agent/perceive", _http_agent_perceive)
+    app.router.add_post("/agent/act", _http_agent_act)
+    app.router.add_post("/agent/game_over", _http_agent_game_over)
+    return app
+
+
 # ── buffer_status 处理 ────────────────────────────────────
 
 async def _process_buffer_status(session_id: str, req_id: str) -> dict:
@@ -555,8 +676,13 @@ async def _cleanup_loop(interval: float):
             logger.info(f"Cleaned up {removed} expired session(s); {store.active_count()} active")
 
 
-async def main(host: str = "0.0.0.0", port: int = 7861):
-    """启动 WebSocket Agent 服务."""
+async def main(host: str = "0.0.0.0", port: int = 7861, http_port: int = 7860):
+    """启动 WebSocket + HTTP Agent 服务.
+
+    WS  服务在 ``port``  (默认 7861) — 供 WebSocketAgentClient 使用。
+    HTTP 服务在 ``http_port`` (默认 7860) — 供 HttpAgentClient / WisAgentClient 使用。
+    两者共享同一个 SessionStore, 处理逻辑完全一致。
+    """
     stop = asyncio.get_event_loop().create_future()
 
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -568,6 +694,20 @@ async def main(host: str = "0.0.0.0", port: int = 7861):
     cleanup_interval = min(max(store.ttl / 4, 60.0), 300.0)
     cleanup_task = asyncio.create_task(_cleanup_loop(cleanup_interval))
 
+    # ── HTTP 兼容服务 ──
+    http_runner = None
+    if HAS_AIOHTTP:
+        http_app = _create_http_app()
+        http_runner = aiohttp_web.AppRunner(http_app)
+        await http_runner.setup()
+        http_site = aiohttp_web.TCPSite(http_runner, host, http_port)
+        await http_site.start()
+        logger.info(f"HTTP compat service running on http://{host}:{http_port}")
+    else:
+        logger.warning("aiohttp not installed — HTTP compat endpoints disabled. "
+                       "Install with: pip install aiohttp")
+
+    # ── WebSocket 服务 ──
     async with websockets.serve(
         handle_connection, host, port, max_size=2**20, process_request=process_request
     ):
@@ -576,9 +716,13 @@ async def main(host: str = "0.0.0.0", port: int = 7861):
         logger.info(f"Session TTL: {store.ttl}s, cleanup every {cleanup_interval}s")
         await stop
 
+    # ── 清理 ──
+    if http_runner:
+        await http_runner.cleanup()
     cleanup_task.cancel()
 
 
 if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 7861
-    asyncio.run(main(port=port))
+    http_port = int(sys.argv[2]) if len(sys.argv) > 2 else 7860
+    asyncio.run(main(port=port, http_port=http_port))
