@@ -454,25 +454,26 @@ def _to_agent_game_state(state: AgentState):
 # 图 API
 # ============================================================
 
-async def perceive(agent_id: str, request: dict) -> AgentState:
+async def perceive(state: AgentState, request: dict) -> AgentState:
     """通过感知图处理游戏事件。"""
+    agent_id = state.get("me_id", "unknown")
     config = {"configurable": {"thread_id": agent_id}}
-    initial = make_initial_state(agent_id)
-    input_state = {**initial, "request": request}
+    input_state = {**state, "request": request}
     result = await perceive_graph_compiled.ainvoke(input_state, config)
     return result
 
 
-async def act(agent_id: str, request: dict) -> dict:
+async def act(state: AgentState, request: dict) -> dict:
     """通过行动图做出游戏决策。"""
+    agent_id = state.get("me_id", "unknown")
     config = {"configurable": {"thread_id": agent_id}}
 
-    # 尝试从检查点获取现有状态；否则回退到初始状态
+    # 尝试从检查点获取现有状态；否则使用传入的状态
     existing = await perceive_graph_compiled.aget_state(config)
     if existing and existing.values:
         base_state = existing.values
     else:
-        base_state = make_initial_state(agent_id)
+        base_state = state
 
     input_state = {**base_state, "request": request}
     result = await act_graph_compiled.ainvoke(input_state, config)
