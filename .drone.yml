@@ -17,7 +17,9 @@ steps:
       - name: project-dir
         path: /deploy
     commands:
+      - apk add --no-cache git
       - cd /deploy
+      - git pull origin main
       - docker compose -p werewolf-agent-langgraph build werewolf-agent
       - docker compose -p werewolf-agent-langgraph up -d --force-recreate --remove-orphans werewolf-agent
     when:
