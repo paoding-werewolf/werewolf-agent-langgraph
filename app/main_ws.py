@@ -119,7 +119,7 @@ async def _process_act(session_id: str, agent_id: str, req_id: str, status: str,
         "round": round_num,
     }
     # LLM 调用是异步的，直接 await
-    result = await run_act(agent_id, req_dict)
+    result = await run_act(state, req_dict)
     store.set(session_id, result)
 
     frames = []
