@@ -196,8 +196,26 @@ class LLMCaller:
                 parsed.setdefault("thought", content)
                 return parsed
             return {"result": content, "target": "all", "extra": {}, "thought": content}
-        except Exception:
-            return {"result": content, "target": "all", "extra": {}, "thought": content}
+
+    def call_with_log_sync(self, agent_id: str, phase: str,
+                           system_prompt: str, user_msg: str,
+                           session_id: str = "") -> str:
+        """Simple synchronous LLM call that logs the prompt and returns the content."""
+        try:
+            resp = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_msg},
+                ],
+                temperature=self.temperature,
+            )
+            content = resp.choices[0].message.content or ""
+        except Exception as e:
+            content = f"ERROR: {str(e)}"
+
+        prompt_logger.log(agent_id, phase, system_prompt, user_msg, content, session_id)
+        return content
 
 
 llm = LLMCaller()
