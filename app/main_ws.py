@@ -71,7 +71,7 @@ async def _process_init(agent_id: str, role: str, teammates: list,
     initial["session_id"] = session_id
 
     request = {"status": "start", "message": ",".join(teammates), "round": 0}
-    state = run_perceive(initial, request)
+    state = await run_perceive(initial, request)
     store.create(session_id, state)
     logger.info(f"Agent {agent_id} initialized as {role}, session={session_id}")
     return session_id, {
@@ -96,7 +96,8 @@ async def _process_perceive(session_id: str, req_id: str, status: str,
         "round": round_num,
         "traces": traces or [],
     }
-    store.set(session_id, run_perceive(state, request))
+    new_state = await run_perceive(state, request)
+    store.set(session_id, new_state)
     return {"type": "perceive_ok", "req_id": req_id}
 
 
@@ -117,8 +118,8 @@ async def _process_act(session_id: str, agent_id: str, req_id: str, status: str,
         "message": message,
         "round": round_num,
     }
-    # LLM 调用是阻塞的, 放到线程池避免卡住事件循环.
-    result = await asyncio.to_thread(run_act, state, req_dict)
+    # LLM 调用是异步的，直接 await
+    result = await run_act(agent_id, req_dict)
     store.set(session_id, result)
 
     frames = []
