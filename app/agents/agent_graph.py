@@ -136,7 +136,17 @@ def _reflect_node(state: AgentState) -> AgentState:
         full_prompt,
     )
 
-    return {**state, "last_thought": reflection}
+    update = {"last_thought": reflection}
+
+    # Extract in-game flags from this round's thought
+    from evolution.in_game_flagger import InGameFlagger
+    flagger = InGameFlagger()
+    new_flags = flagger.extract_flags(reflection)
+    if new_flags:
+        existing_flags = state.get("in_game_flags", [])
+        update["in_game_flags"] = existing_flags + new_flags
+
+    return {**state, **update}
 
 
 def _route_by_phase(state: AgentState) -> Literal[

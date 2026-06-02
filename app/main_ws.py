@@ -76,6 +76,22 @@ async def _process_init(agent_id: str, role: str, teammates: list,
     initial["my_role"] = role
     initial["session_id"] = session_id
 
+    # Populate versions_used for version competition
+    try:
+        from evolution.config import load_config
+        from evolution.version_manager import VersionManager
+        cfg = load_config()
+        vm = VersionManager(cfg)
+        index = vm.loader.load_index()
+        versions_used = {}
+        for skill in index:
+            if skill.get("role") in (role, "common"):
+                v = vm.loader.get_version_for_game(skill["name"])
+                versions_used[skill["name"]] = v
+        initial["versions_used"] = versions_used
+    except Exception:
+        initial["versions_used"] = {}
+
     request = {"status": "start", "message": ",".join(teammates), "round": 0}
     state = await run_perceive(initial, request)
     store.create(session_id, state)
@@ -341,7 +357,6 @@ async def _run_post_game_pipeline(state: dict, result: str,
         from evolution.clustering import SuggestionClusterer
         from evolution.confirmation import ConfirmationJudge
         from evolution.version_manager import VersionManager
-        from evolution.in_game_flagger import InGameFlagger
         from memory.game_archive import save_game, record_strategy_gap
         from memory.self_model import update_self_model
         from memory.opponent_model import update_opponent_from_game
@@ -355,11 +370,8 @@ async def _run_post_game_pipeline(state: dict, result: str,
         # 1. Format trace
         game_trace = format_game_trace(state.get("events", []), state.get("players", {}))
 
-        # 2. Extract in-game flags
-        flagger = InGameFlagger()
-        flags = flagger.extract_flags(state.get("last_thought", ""))
-        # Also include flags accumulated during the game
-        flags.extend(state.get("in_game_flags", []))
+        # 2. Get in-game flags (accumulated during gameplay by _reflect_node)
+        flags = list(state.get("in_game_flags", []))
 
         # 3. Load current strategies
         vm = VersionManager(cfg)
@@ -460,6 +472,32 @@ async def _run_post_game_pipeline(state: dict, result: str,
 
         # 11. Expire old suggestions
         pool.expire_old_suggestions()
+
+        # 11.5 Record game end time for Curator idle tracking
+        from evolution.config import AGENT_HOME
+        curator_state_path = AGENT_HOME / "memory" / "curator_state.json"
+        curator_state = {}
+        if curator_state_path.exists():
+            try:
+                with open(curator_state_path) as f:
+                    curator_state = json.load(f)
+            except Exception:
+                pass
+        from datetime import datetime, timezone
+        curator_state["last_game_end_at"] = datetime.now(timezone.utc).isoformat()
+        curator_state_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(curator_state_path, "w") as f:
+            json.dump(curator_state, f)
+
+        # 12. Check if Curator should run
+        from evolution.curator import Curator
+        curator = Curator(cfg)
+        if curator.should_run(is_game_in_progress=False):
+            try:
+                summary = curator.run()
+                logger.info(f"Curator run completed: {summary}")
+            except Exception as e:
+                logger.warning(f"Curator run failed: {e}")
 
         logger.info(f"Post-game pipeline complete for session {session_id}: result={result}")
     except Exception:

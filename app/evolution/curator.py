@@ -25,7 +25,7 @@ class Curator:
         self.backup_dir = self.skills_root / ".curator_backups"
         self.state_file = AGENT_HOME / "memory" / "curator_state.json"
 
-    def should_run(self, is_game_in_progress: bool) -> bool:
+    def should_run(self, is_game_in_progress: bool = False) -> bool:
         """判断是否应该触发 Curator。"""
         if is_game_in_progress:
             return False
@@ -34,12 +34,26 @@ class Curator:
 
         state = self._load_state()
         last_run = state.get("last_run_at")
+
         if not last_run:
             self._save_state({"last_run_at": datetime.now(timezone.utc).isoformat()})
             return False
 
-        hours_since = (datetime.now(timezone.utc) - datetime.fromisoformat(last_run)).total_seconds() / 3600
-        return hours_since >= self.cfg.curator.interval_hours
+        now = datetime.now(timezone.utc)
+        last_run_dt = datetime.fromisoformat(last_run)
+        hours_since_run = (now - last_run_dt).total_seconds() / 3600
+
+        if hours_since_run < self.cfg.curator.interval_hours:
+            return False
+
+        # Check idle: if any game ended recently (within min_idle_hours), skip
+        last_game_end = state.get("last_game_end_at")
+        if last_game_end:
+            hours_since_game = (now - datetime.fromisoformat(last_game_end)).total_seconds() / 3600
+            if hours_since_game < self.cfg.curator.min_idle_hours:
+                return False
+
+        return True
 
     def run(self) -> Dict:
         """执行 Curator 审查。返回操作摘要。"""
@@ -335,6 +349,9 @@ class Curator:
         return {}
 
     def _save_state(self, state: Dict):
+        """Merge into existing state and write. Preserves fields set by other writers (e.g. last_game_end_at)."""
+        existing = self._load_state()
+        existing.update(state)
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
         with open(self.state_file, "w") as f:
             json.dump(state, f)
