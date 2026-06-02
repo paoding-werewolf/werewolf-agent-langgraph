@@ -10,3 +10,6 @@ services:
     restart: unless-stopped
     environment:
       - APP_ENV=production
+      - WEREWOLF_AGENT_HOME=/root/.werewolf-agent
+    volumes:
+      - /opt/werewolf-agent-data:/root/.werewolf-agent
