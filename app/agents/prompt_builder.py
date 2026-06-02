@@ -201,7 +201,7 @@ This is a thinking framework for the villager role during daytime discussion, fo
                         detail = self._get_historical_detail(phase_group, d, state)
                     elif is_current:
                         status_icon = "🔄"
-                        detail = "[进行中]"
+                        detail = "[进行中]" + self._get_historical_detail(phase_group, d, state)
                     else:
                         status_icon = "⏳"
                         detail = ""

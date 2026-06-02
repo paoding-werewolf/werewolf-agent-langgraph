@@ -27,6 +27,7 @@ class AgentGameState:
     
     # 公共信息快照
     sheriff: Optional[str] = None
+    sheriff_candidates: List[str] = field(default_factory=list)
     dead_this_round: List[str] = field(default_factory=list)
     winner: Optional[str] = None
     

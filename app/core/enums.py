@@ -32,6 +32,8 @@ class GamePhase:
     NIGHT_BEGIN = "night_begin"
     GUARD_ACTION_BEGIN = "guard_action_begin"
     GUARD_ACTION = "guard_action"
+    WOLF_CHAT_BEGIN = "wolf_chat_begin"
+    WOLF_CHAT = "wolf_chat"
     WOLF_GESTURE_BEGIN = "wolf_gesture_begin"
     WOLF_GESTURE = "wolf_gesture"
     WOLF_KILL_BEGIN = "wolf_kill_begin"
@@ -42,6 +44,9 @@ class GamePhase:
     WITCH_ACTION_BEGIN = "witch_action_begin"
     WITCH_ACTION = "witch_action"
     DEATH_SETTLEMENT = "death_settlement"
+    HUNTER_REMINDER_BEGIN = "hunter_reminder_begin"
+    WOLF_KING_REMINDER_BEGIN = "wolf_king_reminder_begin"
+    SHOOT_BEGIN = "shoot_begin"
     SHOOT_REMINDER = "shoot_reminder"
     DAWN_REPORT = "dawn_report"
 
@@ -75,11 +80,13 @@ class GamePhase:
         INIT, START_GAME,
         NIGHT_BEGIN,
         GUARD_ACTION_BEGIN, GUARD_ACTION,
+        WOLF_CHAT_BEGIN, WOLF_CHAT,
         WOLF_GESTURE_BEGIN, WOLF_GESTURE,
         WOLF_KILL_BEGIN, WOLF_KILL, WOLF_KILL_RESULT,
         SEER_CHECK_BEGIN, SEER_CHECK,
         WITCH_ACTION_BEGIN, WITCH_ACTION,
-        DEATH_SETTLEMENT, SHOOT_REMINDER, DAWN_REPORT,
+        DEATH_SETTLEMENT, HUNTER_REMINDER_BEGIN, WOLF_KING_REMINDER_BEGIN,
+        SHOOT_BEGIN, SHOOT_REMINDER, DAWN_REPORT,
         ELECTION_BEGIN, SHERIFF_ELECTION_SIGNUP, SHERIFF_ELECTION_SPEECH,
         SHERIFF_ELECTION_VOTE, SHERIFF_ELECTION_RESULT, SHERIFF_PK_SPEECH, SHERIFF_PK_VOTE, SHERIFF_PK_VOTE_RESULT,
         CHECK_GAME_END, DISCUSS_BEGIN,
@@ -98,6 +105,8 @@ PHASE_CONFIG = {
     GamePhase.NIGHT_BEGIN: {"is_global": True, "applicable_roles": [], "group": "night_begin"},
     GamePhase.GUARD_ACTION_BEGIN: {"is_global": True, "applicable_roles": [], "group": "guard_action"},
     GamePhase.GUARD_ACTION: {"is_global": False, "applicable_roles": [Role.GUARD], "group": "guard_action"},
+    GamePhase.WOLF_CHAT_BEGIN: {"is_global": True, "applicable_roles": [], "group": "wolf_kill"},
+    GamePhase.WOLF_CHAT: {"is_global": False, "applicable_roles": [Role.WOLF, Role.WOLF_KING], "group": "wolf_kill"},
     GamePhase.WOLF_GESTURE_BEGIN: {"is_global": True, "applicable_roles": [], "group": "wolf_kill"},
     GamePhase.WOLF_GESTURE: {"is_global": False, "applicable_roles": [Role.WOLF, Role.WOLF_KING], "group": "wolf_kill"},
     GamePhase.WOLF_KILL_BEGIN: {"is_global": True, "applicable_roles": [], "group": "wolf_kill"},
@@ -108,6 +117,9 @@ PHASE_CONFIG = {
     GamePhase.WITCH_ACTION_BEGIN: {"is_global": True, "applicable_roles": [], "group": "witch_action"},
     GamePhase.WITCH_ACTION: {"is_global": False, "applicable_roles": [Role.WITCH], "group": "witch_action"},
     GamePhase.DEATH_SETTLEMENT: {"is_global": False, "applicable_roles": [], "group": "dawn_report"},
+    GamePhase.HUNTER_REMINDER_BEGIN: {"is_global": True, "applicable_roles": [], "group": "dawn_report"},
+    GamePhase.WOLF_KING_REMINDER_BEGIN: {"is_global": True, "applicable_roles": [], "group": "dawn_report"},
+    GamePhase.SHOOT_BEGIN: {"is_global": True, "applicable_roles": [], "group": "dawn_report"},
     GamePhase.SHOOT_REMINDER: {"is_global": False, "applicable_roles": [Role.HUNTER, Role.WOLF_KING], "group": "dawn_report"},
     GamePhase.DAWN_REPORT: {"is_global": True, "applicable_roles": [], "group": "dawn_report"},
 

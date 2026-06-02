@@ -1,0 +1,87 @@
+"""Normalize wire statuses from the game service into local phase names."""
+
+from __future__ import annotations
+
+from typing import Any, Iterable
+
+
+EVENT_STATUS_MAP = {
+    "start": "start_game",
+    "night": "night_begin",
+    "night_info": "dawn_report",
+    "death_notice": "death_settlement",
+    "discuss": "discussion",
+    "sheriff_election": "sheriff_election_signup",
+    "sheriff_speech": "sheriff_election_speech",
+    "sheriff_vote": "sheriff_election_vote",
+    "sheriff_speech_order": "sheriff_choose",
+    "sheriff_pk": "sheriff_pk_speech",
+    "sheriff": "sheriff_election_result",
+    "hunter": "shoot_skill",
+    "result": "game_over",
+}
+
+ACTION_STATUS_MAP = {
+    **EVENT_STATUS_MAP,
+    "sheriff": "sheriff_transfer",
+}
+
+SKILL_MESSAGE_MAP = (
+    ("guard_action", ("守护", "守卫", "protect")),
+    ("seer_check", ("查验", "预言家", "check")),
+    ("wolf_kill", ("击杀", "刀", "狼人", "kill")),
+    ("witch_action", ("解药", "毒药", "女巫", "heal", "poison")),
+)
+
+SKILL_CONTEXT_MAP = {
+    "guard_action_begin": "guard_action",
+    "guard_action": "guard_action",
+    "seer_check_begin": "seer_check",
+    "seer_check": "seer_check",
+    "wolf_kill_begin": "wolf_kill",
+    "wolf_kill": "wolf_kill",
+    "witch_action_begin": "witch_action",
+    "witch_action": "witch_action",
+}
+
+
+def normalize_status(status: Any, *, mode: str = "event") -> str:
+    value = str(status or "")
+    mapping = ACTION_STATUS_MAP if mode == "action" else EVENT_STATUS_MAP
+    return mapping.get(value, value)
+
+
+def normalize_action_status(status: Any, *, message: Any = "", previous_phase: Any = "") -> str:
+    value = str(status or "")
+    if value != "skill":
+        return normalize_status(value, mode="action")
+
+    text = str(message or "").lower()
+    for phase, tokens in SKILL_MESSAGE_MAP:
+        if any(token in text for token in tokens):
+            return phase
+
+    previous = normalize_status(previous_phase, mode="event")
+    return SKILL_CONTEXT_MAP.get(previous, value)
+
+
+def normalize_event_status(status: Any, traces: Iterable[dict] | None = None, *, message: Any = "") -> str:
+    value = str(status or "")
+    if value == "skill_result":
+        actions = {trace.get("action") for trace in (traces or [])}
+        if actions & {"guard_protect"}:
+            return "guard_action"
+        if actions & {"wolf_kill"}:
+            return "wolf_kill"
+        if actions & {"seer_wolf", "seer_good"}:
+            return "seer_check"
+        if actions & {"witch_heal", "witch_poison"}:
+            return "witch_action"
+        if actions & {"shoot_skill"}:
+            return "shoot_skill"
+
+        text = str(message or "").lower()
+        for phase, tokens in SKILL_MESSAGE_MAP:
+            if any(token in text for token in tokens):
+                return phase
+    return normalize_status(value, mode="event")
