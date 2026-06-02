@@ -7,6 +7,7 @@ from core.enums import Role, PHASE_CONFIG
 from agents.state import AgentState, make_initial_state
 from agents.llm_caller import llm
 from agents.prompt_builder import PromptBuilder
+from agents.protocol import normalize_action_status, normalize_event_status, normalize_status
 
 # Shared checkpointer across both graphs
 checkpointer = MemorySaver()
@@ -22,16 +23,19 @@ def _parse_event(state: AgentState) -> AgentState:
     if not req:
         return state
 
-    status = req.get("status", "")
+    wire_status = req.get("status", "")
     message = req.get("message", "")
     round_num = req.get("round", state["day"])
+    traces = req.get("traces") or []
+    status = normalize_event_status(wire_status, traces, message=message)
 
     event = {
         "status": status,
+        "wire_status": wire_status,
         "content": message,
         "round": round_num,
         "extra": req.get("extra") or {},
-        "traces": req.get("traces") or [],
+        "traces": traces,
     }
 
     events = list(state["events"])
@@ -43,7 +47,7 @@ def _parse_event(state: AgentState) -> AgentState:
     me_id = state["me_id"]
 
     # Phase-specific state updates
-    if status == "start":
+    if status == "start_game":
         if message and my_role.is_wolf_team:
             teammates = message.split(",")
             for tid in teammates:
@@ -51,13 +55,13 @@ def _parse_event(state: AgentState) -> AgentState:
                 if tid in players:
                     players[tid]["role"] = state["my_role"]
 
-    elif status == "death_notice":
+    elif status == "death_settlement":
         ids = re.findall(r"\d+", message)
         for pid in ids:
             if pid in players:
                 players[pid]["is_alive"] = False
 
-    elif status == "sheriff":
+    elif status == "sheriff_election_result":
         match = re.search(r"(\d+)号\s*当选", message)
         if match:
             sid = match.group(1)
@@ -89,7 +93,7 @@ def _parse_event(state: AgentState) -> AgentState:
 
 def _extract_sheriff_from_events(events, players):
     for e in reversed(events):
-        if e.get("status") == "sheriff":
+        if e.get("status") == "sheriff_election_result":
             match = re.search(r"(\d+)号\s*当选", e.get("content", ""))
             if match:
                 return match.group(1)
@@ -140,7 +144,12 @@ def _route_by_phase(state: AgentState) -> Literal[
     "decide_discussion", "decide_vote", "decide_shoot", "decide_generic",
 ]:
     """基于游戏阶段组的条件路由。"""
-    phase = state.get("phase", "")
+    req = state.get("request") or {}
+    phase = normalize_action_status(
+        req.get("status") or state.get("phase", ""),
+        message=req.get("message", ""),
+        previous_phase=state.get("phase", ""),
+    )
     phase_cfg = PHASE_CONFIG.get(phase, {})
     group = phase_cfg.get("group", "")
 
@@ -156,7 +165,12 @@ def _route_by_phase(state: AgentState) -> Literal[
     if group == "witch_action" and my_role == Role.WITCH:
         return "decide_night_role"
 
-    # Election
+    if phase in ("sheriff_election_speech", "sheriff_pk_speech"):
+        return "decide_discussion"
+    if phase == "sheriff_choose":
+        return "decide_generic"
+
+    # Election signup/vote
     if group == "election":
         return "decide_election"
 
@@ -178,10 +192,15 @@ def _decide_night_role(state: AgentState) -> AgentState:
     builder = PromptBuilder(Role(state["my_role"]), state["me_id"])
     gs = _to_agent_game_state(state)
     req = state.get("request") or {}
+    status = normalize_action_status(
+        req.get("status", state["phase"]),
+        message=req.get("message", ""),
+        previous_phase=state.get("phase", ""),
+    )
 
     task_guidance = f"""
 [任务: 夜间行动]
-当前阶段: {req.get('status', state['phase'])}
+当前阶段: {status}
 消息: {req.get('message', '')}
 
 基于你的内心独白：
@@ -207,14 +226,19 @@ def _decide_wolf_gesture(state: AgentState) -> AgentState:
     builder = PromptBuilder(Role(state["my_role"]), state["me_id"])
     gs = _to_agent_game_state(state)
     req = state.get("request") or {}
+    status = normalize_action_status(
+        req.get("status", state["phase"]),
+        message=req.get("message", ""),
+        previous_phase=state.get("phase", ""),
+    )
 
     task_guidance = f"""
 [任务：狼人团队行动]
-当前阶段： {req.get('status', state['phase'])}
+当前阶段： {status}
 消息： {req.get('message', '')}
 
 你正处于狼人夜间阶段。与你的狼人队友交流。
-使用 wolf_gesture 进行交流或使用 wolf_kill 选择目标。
+使用 wolf_chat 进行交流或使用 wolf_kill 选择目标。
 
 之前的反思：
 {state['last_thought']}
@@ -237,10 +261,15 @@ def _decide_election(state: AgentState) -> AgentState:
     builder = PromptBuilder(Role(state["my_role"]), state["me_id"])
     gs = _to_agent_game_state(state)
     req = state.get("request") or {}
+    status = normalize_action_status(
+        req.get("status", state["phase"]),
+        message=req.get("message", ""),
+        previous_phase=state.get("phase", ""),
+    )
 
     task_guidance = f"""
 [任务：警长选举]
-当前阶段： {req.get('status', state['phase'])}
+当前阶段： {status}
 消息： {req.get('message', '')}
 
 决定是否报名竞选警长或投票给候选人。
@@ -265,10 +294,15 @@ def _decide_discussion(state: AgentState) -> AgentState:
     builder = PromptBuilder(Role(state["my_role"]), state["me_id"])
     gs = _to_agent_game_state(state)
     req = state.get("request") or {}
+    status = normalize_action_status(
+        req.get("status", state["phase"]),
+        message=req.get("message", ""),
+        previous_phase=state.get("phase", ""),
+    )
 
     task_guidance = f"""
 [任务：白天讨论]
-当前阶段： {req.get('status', state['phase'])}
+当前阶段： {status}
 消息： {req.get('message', '')}
 
 你的内心独白：
@@ -299,10 +333,15 @@ def _decide_vote(state: AgentState) -> AgentState:
     builder = PromptBuilder(Role(state["my_role"]), state["me_id"])
     gs = _to_agent_game_state(state)
     req = state.get("request") or {}
+    status = normalize_action_status(
+        req.get("status", state["phase"]),
+        message=req.get("message", ""),
+        previous_phase=state.get("phase", ""),
+    )
 
     task_guidance = f"""
 [任务：放逐投票]
-当前阶段： {req.get('status', state['phase'])}
+当前阶段： {status}
 消息： {req.get('message', '')}
 
 你必须投票放逐一名玩家（或跳过/弃权）。
@@ -332,10 +371,15 @@ def _decide_shoot(state: AgentState) -> AgentState:
     builder = PromptBuilder(Role(state["my_role"]), state["me_id"])
     gs = _to_agent_game_state(state)
     req = state.get("request") or {}
+    status = normalize_action_status(
+        req.get("status", state["phase"]),
+        message=req.get("message", ""),
+        previous_phase=state.get("phase", ""),
+    )
 
     task_guidance = f"""
 [任务：开枪技能]
-当前阶段： {req.get('status', state['phase'])}
+当前阶段： {status}
 消息： {req.get('message', '')}
 
 你即将出局。使用开枪技能带走一名玩家（或跳过）。
@@ -364,14 +408,29 @@ def _decide_generic(state: AgentState) -> AgentState:
     builder = PromptBuilder(Role(state["my_role"]), state["me_id"])
     gs = _to_agent_game_state(state)
     req = state.get("request") or {}
+    status = normalize_action_status(
+        req.get("status", state["phase"]),
+        message=req.get("message", ""),
+        previous_phase=state.get("phase", ""),
+    )
 
-    task_guidance = f"""
+    if status == "sheriff_choose":
+        task_guidance = f"""
+[任务：选择发言方向]
+当前阶段： {status}
+消息： {req.get('message', '')}
+
+你是警长，需要选择白天发言从警左还是警右开始。
+"""
+        final_instr = "使用 choose_speech_order 工具返回 left 或 right。"
+    else:
+        task_guidance = f"""
 [任务：决策]
-当前阶段： {req.get('status', state['phase'])}
+当前阶段： {status}
 消息： {req.get('message', '')}
 {state['last_thought']}
 """
-    final_instr = "如果没有要执行的操作，请使用 pass_turn，或者使用 speak/通用动作。"
+        final_instr = "如果没有要执行的操作，请使用 pass_turn，或者使用 speak/通用动作。"
 
     full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, state["last_thought"])
 
@@ -475,7 +534,22 @@ async def act(state: AgentState, request: dict) -> dict:
     else:
         base_state = state
 
-    input_state = {**base_state, "request": request}
+    input_state = {
+        **base_state,
+        "phase": normalize_action_status(
+            request.get("status", base_state.get("phase", "")),
+            message=request.get("message", ""),
+            previous_phase=base_state.get("phase", ""),
+        ),
+        "request": {
+            **request,
+            "status": normalize_action_status(
+                request.get("status", ""),
+                message=request.get("message", ""),
+                previous_phase=base_state.get("phase", ""),
+            ),
+        },
+    }
     result = await act_graph_compiled.ainvoke(input_state, config)
     return result
 

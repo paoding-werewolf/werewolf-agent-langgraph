@@ -88,6 +88,13 @@ TOOLS = [
             "reason": {"type": "string", "description": "Why you're voting for this candidate"},
         },
         ["target"]),
+    _fn("choose_speech_order",
+        "Choose daytime speaking direction as sheriff.",
+        {
+            "direction": {"type": "string", "enum": ["left", "right"], "description": "left = 警左, right = 警右"},
+            "reason": {"type": "string", "description": "Brief reason for choosing this direction"},
+        },
+        ["direction"]),
     _fn("pass_turn",
         "Pass your turn without taking any action.",
         {},
@@ -150,6 +157,9 @@ class LLMCaller:
             action["target"] = None
         elif name == "vote_sheriff":
             action["result"] = args.get("target", "")
+        elif name == "choose_speech_order":
+            action["result"] = args.get("direction", "right")
+            action["target"] = None
 
         return action
 
