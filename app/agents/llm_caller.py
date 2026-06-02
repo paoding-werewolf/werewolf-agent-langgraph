@@ -196,6 +196,8 @@ class LLMCaller:
                 parsed.setdefault("thought", content)
                 return parsed
             return {"result": content, "target": "all", "extra": {}, "thought": content}
+        except Exception:
+            return {"result": content, "target": "all", "extra": {}, "thought": content}
 
     def call_with_log_sync(self, agent_id: str, phase: str,
                            system_prompt: str, user_msg: str,
