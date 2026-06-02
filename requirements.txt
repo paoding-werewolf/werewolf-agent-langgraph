@@ -6,3 +6,4 @@ pydantic
 httpx
 python-dotenv
 pyyaml>=6.0
+langgraph>=0.2.0
