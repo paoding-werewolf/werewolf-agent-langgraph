@@ -477,3 +477,8 @@ async def act(agent_id: str, request: dict) -> dict:
     input_state = {**base_state, "request": request}
     result = await act_graph_compiled.ainvoke(input_state, config)
     return result
+
+
+# 向后兼容的别名导出
+run_perceive = perceive
+run_act = act
