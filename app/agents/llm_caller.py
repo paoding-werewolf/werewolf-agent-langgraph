@@ -2,7 +2,7 @@ import json
 import re
 from typing import Optional, Dict, Any
 
-from openai import OpenAI
+from openai import AsyncOpenAI, OpenAI
 
 from utils.prompt_logger import prompt_logger
 
@@ -109,10 +109,12 @@ class LLMCaller:
         self.model = "deepseek-v4-pro"
         self.temperature = 0.7
 
+        self.async_client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url)
+        # Sync client kept for evolution modules that call llm.client directly
         self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
 
-    def _chat_with_tools(self, system_prompt: str, user_msg: str):
-        resp = self.client.chat.completions.create(
+    async def _chat_with_tools(self, system_prompt: str, user_msg: str):
+        resp = await self.async_client.chat.completions.create(
             model=self.model,
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -163,16 +165,19 @@ class LLMCaller:
 
         return action
 
-    def decide_with_tools_sync(self, agent_id: str, phase: str,
-                               system_prompt: str, user_msg: str,
-                               session_id: str = "") -> Optional[Dict[str, Any]]:
+    async def decide_with_tools(self, agent_id: str, phase: str,
+                                system_prompt: str, user_msg: str,
+                                session_id: str = "") -> Optional[Dict[str, Any]]:
         try:
-            message = self._chat_with_tools(system_prompt, user_msg)
+            message = await self._chat_with_tools(system_prompt, user_msg)
         except Exception as e:
             err = f"ERROR: {str(e)}"
             prompt_logger.log(agent_id, phase, system_prompt, user_msg, err, session_id)
             return {"result": err, "target": "all", "extra": {}}
         return self._process_tool_response(agent_id, phase, system_prompt, user_msg, message, session_id)
+
+    # Keep backward-compatible alias
+    decide_with_tools_sync = decide_with_tools
 
     def _process_tool_response(self, agent_id: str, phase: str,
                                system_prompt: str, user_msg: str, message,
@@ -209,12 +214,12 @@ class LLMCaller:
         except Exception:
             return {"result": content, "target": "all", "extra": {}, "thought": content}
 
-    def call_with_log_sync(self, agent_id: str, phase: str,
-                           system_prompt: str, user_msg: str,
-                           session_id: str = "") -> str:
-        """Simple synchronous LLM call that logs the prompt and returns the content."""
+    async def call_with_log(self, agent_id: str, phase: str,
+                            system_prompt: str, user_msg: str,
+                            session_id: str = "") -> str:
+        """Async LLM call that logs the prompt and returns the content."""
         try:
-            resp = self.client.chat.completions.create(
+            resp = await self.async_client.chat.completions.create(
                 model=self.model,
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -228,6 +233,9 @@ class LLMCaller:
 
         prompt_logger.log(agent_id, phase, system_prompt, user_msg, content, session_id)
         return content
+
+    # Keep backward-compatible alias
+    call_with_log_sync = call_with_log
 
 
 llm = LLMCaller()
