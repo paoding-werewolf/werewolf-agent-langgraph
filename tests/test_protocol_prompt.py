@@ -41,7 +41,7 @@ def test_normalize_wire_status_for_event_and_action():
     assert normalize_status("sheriff", mode="action") == "sheriff_transfer"
     assert normalize_status("death_notice") == "death_settlement"
     assert normalize_action_status("skill", message="请选择查验目标") == "seer_check"
-    assert normalize_action_status("skill", previous_phase="guard_action_begin") == "guard_action"
+    assert normalize_action_status("skill", previous_phase="guard_action") == "guard_action"
     assert normalize_event_status(
         "skill_result",
         [{"from": "5", "to": "2", "action": "seer_good"}],
@@ -85,7 +85,7 @@ def test_choose_speech_order_tool_returns_direction_for_server():
 
 def test_route_restores_generic_skill_action_from_message():
     state = _state(
-        phase="seer_check_begin",
+        phase="seer_check",
         request={"status": "skill", "message": "请选择查验目标", "round": 1},
     )
     state["my_role"] = "seer"
@@ -96,7 +96,7 @@ def test_route_restores_generic_skill_action_from_message():
 def test_parse_event_normalizes_sheriff_result_and_updates_state():
     state = _state(request={"status": "sheriff", "message": "2号 当选警长", "round": 1})
     state["players"] = {
-        str(i): {"id": str(i), "name": f"{i}号", "role": None, "is_alive": True, "is_sheriff": False}
+        str(i): {"id": str(i), "name": f"{i}号", "role": None}
         for i in range(1, 4)
     }
 
@@ -104,7 +104,6 @@ def test_parse_event_normalizes_sheriff_result_and_updates_state():
 
     assert new_state["phase"] == "sheriff_election_result"
     assert new_state["sheriff"] == "2"
-    assert new_state["players"]["2"]["is_sheriff"] is True
 
 
 def test_parse_event_infers_skill_result_phase_from_trace():
@@ -117,8 +116,8 @@ def test_parse_event_infers_skill_result_phase_from_trace():
         }
     )
     state["players"] = {
-        "2": {"id": "2", "name": "2号", "role": None, "is_alive": True, "is_sheriff": False},
-        "5": {"id": "5", "name": "5号", "role": "seer", "is_alive": True, "is_sheriff": False},
+        "2": {"id": "2", "name": "2号", "role": None},
+        "5": {"id": "5", "name": "5号", "role": "seer"},
     }
 
     new_state = _parse_event(state)
@@ -132,16 +131,16 @@ def test_parse_event_infers_skill_result_phase_from_trace():
 def test_parse_event_marks_dead_players_after_death_notice_normalization():
     state = _state(request={"status": "death_notice", "message": "昨晚 2号 死亡", "round": 1})
     state["players"] = {
-        "2": {"id": "2", "name": "2号", "role": None, "is_alive": True, "is_sheriff": False},
+        "2": {"id": "2", "name": "2号", "role": None},
     }
 
     new_state = _parse_event(state)
 
     assert new_state["phase"] == "death_settlement"
-    assert new_state["players"]["2"]["is_alive"] is False
+    assert new_state["events"][-1]["status"] == "death_settlement"
 
 
-def test_current_discussion_prompt_includes_prior_speeches():
+def test_current_discussion_prompt_includes_public_event_summary_without_future_timeline():
     game_state = AgentGameState(
         room_id="room",
         me_id="3",
@@ -172,6 +171,8 @@ def test_current_discussion_prompt_includes_prior_speeches():
 
     prompt = PromptBuilder(Role.VILLAGER, "3").get_game_info(game_state)
 
-    assert "🔄 Day1 白天发言 [进行中]" in prompt
+    assert "当前阶段: 白天发言" in prompt
     assert "1号：我是好人，先听后置位。" in prompt
     assert "2号：警长发言，我会归票。" in prompt
+    assert "守卫" not in prompt
+    assert "预言家已淘汰" not in prompt

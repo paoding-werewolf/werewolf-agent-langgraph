@@ -34,14 +34,15 @@ SKILL_MESSAGE_MAP = (
 )
 
 SKILL_CONTEXT_MAP = {
-    "guard_action_begin": "guard_action",
     "guard_action": "guard_action",
-    "seer_check_begin": "seer_check",
     "seer_check": "seer_check",
-    "wolf_kill_begin": "wolf_kill",
     "wolf_kill": "wolf_kill",
-    "witch_action_begin": "witch_action",
     "witch_action": "witch_action",
+    # 兼容此前从服务端复制过来的 begin-phase。
+    "guard_action_begin": "guard_action",
+    "seer_check_begin": "seer_check",
+    "wolf_kill_begin": "wolf_kill",
+    "witch_action_begin": "witch_action",
 }
 
 

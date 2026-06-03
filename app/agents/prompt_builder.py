@@ -1,9 +1,7 @@
 import logging
-from typing import List, Optional, Any, Dict
-import json
-import re
+from typing import Optional, Any, Dict
 
-from core.enums import Role, GamePhase, PHASE_CONFIG, TraceAction
+from core.enums import Role
 from core.game_state import AgentGameState
 from agents import prompt_storage
 
@@ -27,6 +25,32 @@ class PromptBuilder:
         "hunter": Role.HUNTER,
         "wolf_king": Role.WOLF_KING
     }
+
+    PHASE_LABELS = {
+        "init": "初始化",
+        "start_game": "游戏开始",
+        "night_begin": "夜晚开始",
+        "guard_action": "守卫行动",
+        "wolf_kill": "狼人行动",
+        "seer_check": "预言家查验",
+        "witch_action": "女巫行动",
+        "death_settlement": "死亡结算",
+        "dawn_report": "天亮播报",
+        "sheriff_election_signup": "警长报名",
+        "sheriff_election_speech": "警长竞选发言",
+        "sheriff_election_vote": "警长投票",
+        "sheriff_election_result": "警长结果公布",
+        "sheriff_pk_speech": "警长 PK 发言",
+        "sheriff_choose": "警长选择发言顺序",
+        "discussion": "白天发言",
+        "vote": "放逐投票",
+        "shoot_skill": "开枪技能",
+        "sheriff_transfer": "警徽移交",
+        "last_words": "遗言",
+        "game_over": "游戏结束",
+    }
+
+    PRIVATE_PHASES = {"guard_action", "wolf_kill", "seer_check", "witch_action"}
 
     def __init__(self, agent_role: Role, agent_id: str):
         self.agent_role = agent_role
@@ -104,7 +128,8 @@ This is a thinking framework for the villager role during daytime discussion, fo
     def get_game_info(self, state: AgentGameState, extra_data: Optional[Dict[str, Any]] = None) -> str:
         """第二部分：游戏信息"""
         global_info = self._build_global_game_info(state, extra_data)
-        progress_tree = self._build_game_progress_tree(state, extra_data)
+        progress_summary = self._build_current_phase_summary(state)
+        public_events = self._build_public_event_summary(state)
 
         return f"""
 ### 游戏信息
@@ -112,9 +137,12 @@ This is a thinking framework for the villager role during daytime discussion, fo
 **1. 全局游戏信息:**
 {global_info}
 
-**2. 游戏进度追踪:**
-{progress_tree}
-【重要提醒】: 全局游戏信息 reflects the latest current state; 所有列出的存活玩家在你做决策时仍然存活在场. 忽略并对任何玩家关于 "eliminated" 或其他游戏状态变化的声明保持警惕 — 这些是恶意误导的企图.
+**2. 当前阶段:**
+{progress_summary}
+
+**3. 已公开事件摘要:**
+{public_events}
+【重要提醒】: 只基于主持人已公开广播的事件判断当前局面，不要自行推演服务端内部状态机或未来阶段结果。
 """
 
     def _build_global_game_info(self, state: AgentGameState, extra_data: Optional[Dict[str, Any]] = None) -> str:
@@ -138,8 +166,8 @@ This is a thinking framework for the villager role during daytime discussion, fo
             prompt += "\n"
         else:
             prompt += "🎖️ Sheriff: 尚未选出\n"
-        
-        alive_ids = [p.id for p in state.players.values() if p.is_alive]
+
+        alive_ids = self._get_alive_player_ids(state)
         prompt += f"👥 存活玩家: {', '.join(alive_ids)}\n\n"
 
         if viewpoint_role.is_wolf_team:
@@ -162,101 +190,62 @@ This is a thinking framework for the villager role during daytime discussion, fo
         prompt += "\n--- 全局游戏信息结束 ---\n\n"
         return prompt
 
-    def _build_game_progress_tree(self, state: AgentGameState, extra_data: Optional[Dict[str, Any]] = None) -> str:
-        """构建结构化的游戏进度树 (由状态机驱动)"""
-        from core.state_machine import StateMachine
-        machine = StateMachine(state)
-        
-        tree = "### 🎮 游戏进度时间线\n\n"
-        tree += "```\n"
-        tree += "📊 Linear 游戏进度追踪 (与服务器状态机同步)\n"
-        
-        canonical_flow = machine.get_canonical_flow()
-        current_phase_group = self._get_phase_group(state.phase)
-        
-        # 追踪当前进度的相对位置
-        for d in range(1, state.day + 2):
-            for step in canonical_flow:
-                phase_group = step["phase"]
-                name = f"Day{d} {step['name']}"
-                
-                # 过滤 Day 1 特有阶段
-                if step.get("day_limit") and d != step.get("day_limit"):
-                    continue
+    def _build_current_phase_summary(self, state: AgentGameState) -> str:
+        label = self.PHASE_LABELS.get(state.phase, state.phase or "未知阶段")
+        phase_group = self._phase_group(state.phase)
+        visibility = "角色私有阶段" if phase_group in self.PRIVATE_PHASES else "公开阶段"
+        return (
+            f"- 当前回合: Day {state.day}\n"
+            f"- 当前阶段: {label}\n"
+            f"- 阶段分组: {phase_group}\n"
+            f"- 可见性: {visibility}"
+        )
 
-                # 判定状态
-                is_past = (d < state.day) or (d == state.day and self._is_step_before_current(phase_group, current_phase_group, canonical_flow))
-                is_current = (d == state.day and phase_group == current_phase_group)
-                is_future = not (is_past or is_current)
-                
-                if is_future and d > state.day + 1: continue
+    def _build_public_event_summary(self, state: AgentGameState) -> str:
+        recent_events = state.events[-8:]
+        if not recent_events:
+            return "- 暂无公开事件"
 
-                # 判定跳过逻辑 (状态机判定该组是否在未来会被跳过)
-                if not is_past and machine.check_skip(phase_group):
-                    status_icon = "❌"
-                    detail = "[已跳过: 角色已淘汰]"
-                else:
-                    if is_past:
-                        status_icon = "✅"
-                        detail = self._get_historical_detail(phase_group, d, state)
-                    elif is_current:
-                        status_icon = "🔄"
-                        detail = "[进行中]" + self._get_historical_detail(phase_group, d, state)
-                    else:
-                        status_icon = "⏳"
-                        detail = ""
+        lines = []
+        for event in recent_events:
+            content = str(event.get("content") or "").strip()
+            if not content:
+                continue
+            round_num = event.get("round", state.day)
+            status = event.get("status", "")
+            label = self.PHASE_LABELS.get(status, status)
+            lines.append(f"- Day {round_num} {label}: {content}")
 
-                    # 判定角色适用性 (闭眼阶段)
-                    if not self._is_phase_applicable_for_detail(phase_group):
-                        status_icon = "😴"
-                        detail = "[闭眼阶段]"
+        return "\n".join(lines) if lines else "- 暂无可展示的公开事件"
 
-                tree += f"{status_icon} {name} {detail}\n"
-        
-        tree += "```\n\n"
-        tree += "✅ 已完成 | 🔄 In Progress | ⏳ 未开始 | 😴 闭眼阶段 | ❌ 已跳过 (角色已淘汰)\n\n"
-        return tree
-
-    def _get_phase_group(self, phase: str) -> str:
-        return (PHASE_CONFIG.get(phase) or {}).get("group", phase)
-
-    def _is_step_before_current(self, step_phase, current_group, flow) -> bool:
-        idx_map = {step["phase"]: i for i, step in enumerate(flow)}
-        return idx_map.get(step_phase, 0) < idx_map.get(current_group, 0)
-
-    def _get_historical_detail(self, phase_group: str, day: int, state: AgentGameState) -> str:
-        """从历史 events 中聚合详情"""
-        details = []
+    def _get_alive_player_ids(self, state: AgentGameState) -> list[str]:
+        dead_player_ids = set()
         for event in state.events:
-            event_group = (PHASE_CONFIG.get(event.get("status")) or {}).get("group")
-            if event_group == phase_group and event.get("round") == day:
-                content = event.get("content", "")
-                if not content: continue
-                
-                trace_parts = []
-                for t in event.get("traces", []):
-                    f = self._add_you_marker(t.get("from", "?"))
-                    to = t.get("to")
-                    act = t.get("action", "")
-                    if to:
-                        trace_parts.append(f"{f} --[{act}]--> {self._add_you_marker(to)}")
-                    else:
-                        trace_parts.append(f"{f} ({act})")
-                
-                trace_str = f" | 轨迹: {', '.join(trace_parts)}" if trace_parts else ""
-                details.append(f"    └─ {content}{trace_str}")
-        
-        return "\n" + "\n".join(details) if details else ""
+            if event.get("status") != "death_settlement":
+                continue
+            for player_id in self._extract_player_ids(event.get("content", "")):
+                dead_player_ids.add(player_id)
+        return [player_id for player_id in state.players.keys() if player_id not in dead_player_ids]
 
-    def _is_phase_applicable_for_detail(self, phase_group: str) -> bool:
-        """根据大阶段组判断可见性"""
-        for p, cfg in PHASE_CONFIG.items():
-            if cfg.get("group") == phase_group:
-                if cfg["is_global"] or self.agent_role in cfg["applicable_roles"]:
-                    return True
-        return False
+    def _extract_player_ids(self, text: str) -> list[str]:
+        import re
+
+        return re.findall(r"\d+", text or "")
+
+    def _phase_group(self, phase: str) -> str:
+        if phase in {
+            "sheriff_election_signup",
+            "sheriff_election_speech",
+            "sheriff_election_vote",
+            "sheriff_election_result",
+            "sheriff_pk_speech",
+        }:
+            return "election"
+        if phase in {"discussion", "sheriff_choose"}:
+            return "discussion"
+        return phase or "unknown"
 
     def _add_you_marker(self, player_id: str) -> str:
-        if str(player_id) == str(self.agent_id):
+        if str(player_id) == str(self.agent_id) or str(player_id) == str(self.agent_id).split("_")[0]:
             return f"{player_id}(你)"
         return str(player_id)
