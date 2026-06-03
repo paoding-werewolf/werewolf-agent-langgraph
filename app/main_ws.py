@@ -34,6 +34,7 @@ import email.utils
 import http
 import json
 import logging
+import os
 import signal
 import sys
 import uuid
@@ -64,6 +65,19 @@ logger = logging.getLogger("ws_agent_service")
 
 # 每个 session_id 一份独立状态; 空闲超过 TTL (默认 2h, 可配 SESSION_TTL_SECONDS) 后清理.
 store = SessionStore()
+
+
+def _provider_public_urls() -> tuple[str, str]:
+    """Return externally reachable HTTP / WS base URLs for provider consumers."""
+    http_url = os.getenv("PROVIDER_PUBLIC_HTTP_URL", "").strip().rstrip("/")
+    ws_url = os.getenv("PROVIDER_PUBLIC_WS_URL", "").strip().rstrip("/")
+    if http_url and ws_url:
+        return http_url, ws_url
+
+    public_host = os.getenv("PROVIDER_PUBLIC_HOST", "").strip() or "172.17.0.1"
+    http_port = int(os.getenv("PROVIDER_PUBLIC_HTTP_PORT", "8083"))
+    ws_port = int(os.getenv("PROVIDER_PUBLIC_WS_PORT", "8082"))
+    return f"http://{public_host}:{http_port}", f"ws://{public_host}:{ws_port}"
 
 
 def _build_versions_used(role: str, external_agent_id: str | None = None) -> dict:
@@ -99,6 +113,7 @@ def _list_provider_agents() -> list[dict]:
     from evolution.config import load_config
     from evolution.version_manager import VersionManager
 
+    _http_base, ws_base = _provider_public_urls()
     cfg = load_config()
     vm = VersionManager(cfg)
     index = vm.loader.load_index()
@@ -112,7 +127,7 @@ def _list_provider_agents() -> list[dict]:
             "external_agent_id": "default:common",
             "agent_name": "DefaultAgent",
             "client_type": "ws",
-            "client_url": "ws://localhost:7861",
+            "client_url": ws_base,
             "model_name": "werewolf-agent-langgraph",
             "version": "default",
             "health": "available",
@@ -139,7 +154,7 @@ def _list_provider_agents() -> list[dict]:
                         "external_agent_id": f"skill:{skill['name']}:{version_name}:{role}",
                         "agent_name": f"{skill['name']}:{version_name}",
                         "client_type": "ws",
-                        "client_url": "ws://localhost:7861",
+                        "client_url": ws_base,
                         "model_name": "werewolf-agent-langgraph",
                         "version": version_name,
                         "health": "available",
