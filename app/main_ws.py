@@ -37,6 +37,7 @@ import logging
 import signal
 import sys
 import uuid
+from collections import defaultdict
 from urllib.parse import urlsplit, parse_qs
 
 import websockets
@@ -65,8 +66,99 @@ logger = logging.getLogger("ws_agent_service")
 store = SessionStore()
 
 
+def _build_versions_used(role: str, external_agent_id: str | None = None) -> dict:
+    """Build the concrete skill-version map for one game session.
+
+    Provider mode currently exposes:
+    - a default participant using each skill's current selection logic
+    - per-skill candidate participants that override one skill to a fixed version
+    """
+    from evolution.config import load_config
+    from evolution.version_manager import VersionManager
+
+    cfg = load_config()
+    vm = VersionManager(cfg)
+    index = vm.loader.load_index()
+    versions_used = {}
+    for skill in index:
+        if skill.get("role") in (role, "common"):
+            versions_used[skill["name"]] = vm.loader.get_version_for_game(skill["name"])
+
+    if external_agent_id:
+        parts = external_agent_id.split(":")
+        if len(parts) == 4 and parts[0] == "skill":
+            _, skill_name, version, agent_role = parts
+            if agent_role == role and skill_name in versions_used:
+                versions_used[skill_name] = version
+
+    return versions_used
+
+
+def _list_provider_agents() -> list[dict]:
+    """Expose version-addressable participants for the orchestration layer."""
+    from evolution.config import load_config
+    from evolution.version_manager import VersionManager
+
+    cfg = load_config()
+    vm = VersionManager(cfg)
+    index = vm.loader.load_index()
+    grouped: dict[str, list[dict]] = defaultdict(list)
+    for skill in index:
+        role = skill.get("role") or "common"
+        grouped[role].append(skill)
+
+    result = [
+        {
+            "external_agent_id": "default:common",
+            "agent_name": "DefaultAgent",
+            "client_type": "ws",
+            "client_url": "ws://localhost:7861",
+            "model_name": "werewolf-agent-langgraph",
+            "version": "default",
+            "health": "available",
+            "status": "available",
+            "metadata": {
+                "mode": "default",
+                "role_scope": "all",
+                "skill_count": len(index),
+            },
+        }
+    ]
+
+    for role, skills in grouped.items():
+        if role == "common":
+            continue
+        for skill in skills:
+            meta = vm.loader._load_versions_meta(skill["name"]) or {}
+            versions = meta.get("versions", {})
+            for version_name, version_meta in versions.items():
+                if version_meta.get("status") != "candidate":
+                    continue
+                result.append(
+                    {
+                        "external_agent_id": f"skill:{skill['name']}:{version_name}:{role}",
+                        "agent_name": f"{skill['name']}:{version_name}",
+                        "client_type": "ws",
+                        "client_url": "ws://localhost:7861",
+                        "model_name": "werewolf-agent-langgraph",
+                        "version": version_name,
+                        "health": "available",
+                        "status": "available",
+                        "metadata": {
+                            "mode": "skill_override",
+                            "role_scope": role,
+                            "skill_name": skill["name"],
+                            "skill_version": version_name,
+                            "description": skill.get("description", ""),
+                            "usage": version_meta.get("usage", {}),
+                        },
+                    }
+                )
+    return result
+
+
 async def _process_init(agent_id: str, role: str, teammates: list,
-                        req_id: str) -> tuple[str, dict]:
+                        req_id: str, external_agent_id: str | None = None) -> tuple[str, dict]:
     """初始化 agent: 铸造唯一 session_id, 创建初始状态并写入 SessionStore.
 
     返回 (session_id, response). session_id 作为该实例后续 perceive/act 的路由键.
@@ -75,20 +167,10 @@ async def _process_init(agent_id: str, role: str, teammates: list,
     initial = make_initial_state(agent_id)
     initial["my_role"] = role
     initial["session_id"] = session_id
+    initial["external_agent_id"] = external_agent_id or ""
 
-    # Populate versions_used for version competition
     try:
-        from evolution.config import load_config
-        from evolution.version_manager import VersionManager
-        cfg = load_config()
-        vm = VersionManager(cfg)
-        index = vm.loader.load_index()
-        versions_used = {}
-        for skill in index:
-            if skill.get("role") in (role, "common"):
-                v = vm.loader.get_version_for_game(skill["name"])
-                versions_used[skill["name"]] = v
-        initial["versions_used"] = versions_used
+        initial["versions_used"] = _build_versions_used(role, external_agent_id)
     except Exception:
         initial["versions_used"] = {}
 
@@ -101,6 +183,7 @@ async def _process_init(agent_id: str, role: str, teammates: list,
         "req_id": req_id,
         "session_id": session_id,
         "agent_id": agent_id,
+        "external_agent_id": external_agent_id,
     }
 
 
@@ -193,8 +276,9 @@ async def handle_connection(ws: ServerConnection):
                 agent_id = msg.get("agent_id", "")
                 role = msg.get("role", "villager")
                 teammates = msg.get("teammates", [])
+                external_agent_id = msg.get("external_agent_id")
                 _session_id, resp = await _process_init(
-                    agent_id, role, teammates, req_id
+                    agent_id, role, teammates, req_id, external_agent_id
                 )
 
             elif msg_type == "perceive":
@@ -513,7 +597,7 @@ async def _http_agent_info(request):
     """GET /agent/info — 探测端点, 返回模型名/版本/健康状态。"""
     return aiohttp_web.json_response({
         "model": "werewolf-agent-langgraph",
-        "version": "2.0",
+        "version": "2.1",
         "name": "Werewolf Agent (WS+HTTP)",
         "protocols": ["ws", "http"],
     })
@@ -522,6 +606,23 @@ async def _http_agent_info(request):
 async def _http_health(request):
     """GET /health — 健康检查。"""
     return aiohttp_web.json_response({"status": "ok"})
+
+
+async def _http_provider_health(request):
+    """GET /provider/health — orchestration-facing provider health."""
+    return aiohttp_web.json_response({
+        "status": "ok",
+        "provider_name": "LangGraph Evolution Agent Service",
+        "provider_type": "langgraph",
+        "model_name": "werewolf-agent-langgraph",
+        "version": "2.1",
+        "capabilities": ["ws", "http", "versioned_agents", "evolution"],
+    })
+
+
+async def _http_provider_agents(request):
+    """GET /provider/agents — orchestration-facing participant list."""
+    return aiohttp_web.json_response(_list_provider_agents())
 
 
 async def _http_agent_init(request):
@@ -534,10 +635,11 @@ async def _http_agent_init(request):
     data = await request.json()
     agent_id = data.get("agent_id", "")
     role = data.get("role", "villager")
+    external_agent_id = data.get("external_agent_id")
     teammates_str = data.get("teammates", "")
     teammates = [t.strip() for t in teammates_str.split(",") if t.strip()] if teammates_str else []
 
-    _sid, resp = await _process_init(agent_id, role, teammates, "http-0")
+    _sid, resp = await _process_init(agent_id, role, teammates, "http-0", external_agent_id)
     return aiohttp_web.json_response(resp)
 
 
@@ -606,6 +708,8 @@ def _create_http_app():
     app.router.add_get("/agent/info", _http_agent_info)
     app.router.add_get("/health", _http_health)
     app.router.add_get("/", _http_health)
+    app.router.add_get("/provider/health", _http_provider_health)
+    app.router.add_get("/provider/agents", _http_provider_agents)
     app.router.add_post("/agent/init", _http_agent_init)
     app.router.add_post("/agent/perceive", _http_agent_perceive)
     app.router.add_post("/agent/act", _http_agent_act)
