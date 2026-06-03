@@ -47,6 +47,7 @@ def _parse_event(state: AgentState) -> AgentState:
     events.append(event)
 
     players = {pid: dict(pdata) for pid, pdata in state["players"].items()}
+    state_sheriff = state.get("sheriff")
 
     my_role = Role(state["my_role"])
 
@@ -63,10 +64,6 @@ def _parse_event(state: AgentState) -> AgentState:
         match = re.search(r"(\d+)号\s*当选", message)
         if match:
             state_sheriff = match.group(1)
-        else:
-            state_sheriff = state.get("sheriff")
-    else:
-        state_sheriff = state.get("sheriff")
 
     # Player metadata updates from traces
     for trace in event.get("traces", []):
