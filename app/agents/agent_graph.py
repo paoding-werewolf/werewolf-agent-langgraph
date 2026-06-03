@@ -1,21 +1,26 @@
 import re
 from typing import Literal
-from langgraph.graph import StateGraph, END
-from langgraph.checkpoint.memory import MemorySaver
-from core.enums import Role, PHASE_CONFIG
+from core.enums import Role
 
-from agents.state import AgentState, make_initial_state
+from agents.state import AgentState
 from agents.llm_caller import llm
 from agents.prompt_builder import PromptBuilder
-from agents.protocol import normalize_action_status, normalize_event_status, normalize_status
+from agents.protocol import normalize_action_status, normalize_event_status
 
-# Shared checkpointer across both graphs
-checkpointer = MemorySaver()
-
-
-# ============================================================
-# Perceive Graph — processes incoming game events
-# ============================================================
+PRIVATE_NIGHT_ACTIONS = {
+    "guard_action": Role.GUARD,
+    "seer_check": Role.SEER,
+    "witch_action": Role.WITCH,
+}
+WOLF_TEAM_PHASES = {"wolf_kill"}
+DISCUSSION_PHASES = {"discussion", "sheriff_election_speech", "sheriff_pk_speech"}
+ELECTION_PHASES = {
+    "sheriff_election_signup",
+    "sheriff_election_vote",
+    "sheriff_election_result",
+}
+VOTE_PHASES = {"vote"}
+SHOOT_PHASES = {"dawn_report", "shoot_skill"}
 
 def _parse_event(state: AgentState) -> AgentState:
     """将传入的 ActRequest 作为游戏事件处理，更新状态。"""
@@ -44,7 +49,6 @@ def _parse_event(state: AgentState) -> AgentState:
     players = {pid: dict(pdata) for pid, pdata in state["players"].items()}
 
     my_role = Role(state["my_role"])
-    me_id = state["me_id"]
 
     # Phase-specific state updates
     if status == "start_game":
@@ -55,18 +59,14 @@ def _parse_event(state: AgentState) -> AgentState:
                 if tid in players:
                     players[tid]["role"] = state["my_role"]
 
-    elif status == "death_settlement":
-        ids = re.findall(r"\d+", message)
-        for pid in ids:
-            if pid in players:
-                players[pid]["is_alive"] = False
-
     elif status == "sheriff_election_result":
         match = re.search(r"(\d+)号\s*当选", message)
         if match:
-            sid = match.group(1)
-            for p in players.values():
-                p["is_sheriff"] = (p["id"] == sid)
+            state_sheriff = match.group(1)
+        else:
+            state_sheriff = state.get("sheriff")
+    else:
+        state_sheriff = state.get("sheriff")
 
     # Player metadata updates from traces
     for trace in event.get("traces", []):
@@ -87,32 +87,17 @@ def _parse_event(state: AgentState) -> AgentState:
         "round": round_num,
         "players": players,
         "events": events,
-        "sheriff": _extract_sheriff_from_events(events, state["players"]),
+        "sheriff": _extract_sheriff_from_events(events, state_sheriff),
     }
 
 
-def _extract_sheriff_from_events(events, players):
+def _extract_sheriff_from_events(events, current_sheriff):
     for e in reversed(events):
         if e.get("status") == "sheriff_election_result":
             match = re.search(r"(\d+)号\s*当选", e.get("content", ""))
             if match:
                 return match.group(1)
-        for pdata in players.values():
-            if pdata.get("is_sheriff"):
-                return pdata["id"]
-    return None
-
-
-perceive_graph = StateGraph(AgentState)
-perceive_graph.add_node("process_event", _parse_event)
-perceive_graph.set_entry_point("process_event")
-perceive_graph.add_edge("process_event", END)
-perceive_graph_compiled = perceive_graph.compile(checkpointer=checkpointer)
-
-
-# ============================================================
-# Act Graph — AI decision making with conditional branching
-# ============================================================
+    return current_sheriff
 
 def _reflect_node(state: AgentState) -> AgentState:
     """AI 内部反思：分析游戏状态并形成思路。"""
@@ -120,7 +105,7 @@ def _reflect_node(state: AgentState) -> AgentState:
 
     task_guidance = """
 [任务：关键反思]
-1. 浏览游戏进度时间线，找出逻辑矛盾。
+1. 浏览当前公开信息与历史广播，找出逻辑矛盾。
 2. 谁是最可疑的狼人？谁是已确认的神职？
 3. 你目前的立场是什么？你是否被怀疑？你将如何辩护？
 """
@@ -153,45 +138,29 @@ def _route_by_phase(state: AgentState) -> Literal[
     "decide_night_role", "decide_wolf_gesture", "decide_election",
     "decide_discussion", "decide_vote", "decide_shoot", "decide_generic",
 ]:
-    """基于游戏阶段组的条件路由。"""
+    """基于最小协议 phase 做条件路由。"""
     req = state.get("request") or {}
     phase = normalize_action_status(
         req.get("status") or state.get("phase", ""),
         message=req.get("message", ""),
         previous_phase=state.get("phase", ""),
     )
-    phase_cfg = PHASE_CONFIG.get(phase, {})
-    group = phase_cfg.get("group", "")
 
     my_role = Role(state["my_role"])
 
-    # Night: role-specific actions
-    if group == "guard_action" and my_role == Role.GUARD:
+    if PRIVATE_NIGHT_ACTIONS.get(phase) == my_role:
         return "decide_night_role"
-    if group == "wolf_kill" and my_role.is_wolf_team:
+    if phase in WOLF_TEAM_PHASES and my_role.is_wolf_team:
         return "decide_wolf_gesture"
-    if group == "seer_check" and my_role == Role.SEER:
-        return "decide_night_role"
-    if group == "witch_action" and my_role == Role.WITCH:
-        return "decide_night_role"
-
-    if phase in ("sheriff_election_speech", "sheriff_pk_speech"):
+    if phase in DISCUSSION_PHASES:
         return "decide_discussion"
     if phase == "sheriff_choose":
         return "decide_generic"
-
-    # Election signup/vote
-    if group == "election":
+    if phase in ELECTION_PHASES:
         return "decide_election"
-
-    # Daytime
-    if group == "discussion":
-        return "decide_discussion"
-    if group == "vote":
+    if phase in VOTE_PHASES:
         return "decide_vote"
-
-    # Shooting
-    if group in ("dawn_report", "shoot_skill") and my_role in (Role.HUNTER, Role.WOLF_KING):
+    if phase in SHOOT_PHASES and my_role in (Role.HUNTER, Role.WOLF_KING):
         return "decide_shoot"
 
     return "decide_generic"
@@ -453,46 +422,15 @@ def _decide_generic(state: AgentState) -> AgentState:
     return {**state, "next_action": action}
 
 
-# ---- 行动图构建 ----
-act_graph = StateGraph(AgentState)
-
-act_graph.add_node("reflect", _reflect_node)
-act_graph.add_node("decide_night_role", _decide_night_role)
-act_graph.add_node("decide_wolf_gesture", _decide_wolf_gesture)
-act_graph.add_node("decide_election", _decide_election)
-act_graph.add_node("decide_discussion", _decide_discussion)
-act_graph.add_node("decide_vote", _decide_vote)
-act_graph.add_node("decide_shoot", _decide_shoot)
-act_graph.add_node("decide_generic", _decide_generic)
-
-act_graph.set_entry_point("reflect")
-act_graph.add_conditional_edges(
-    "reflect",
-    _route_by_phase,
-    {
-        "decide_night_role": "decide_night_role",
-        "decide_wolf_gesture": "decide_wolf_gesture",
-        "decide_election": "decide_election",
-        "decide_discussion": "decide_discussion",
-        "decide_vote": "decide_vote",
-        "decide_shoot": "decide_shoot",
-        "decide_generic": "decide_generic",
-    },
-)
-for node in ["decide_night_role", "decide_wolf_gesture", "decide_election",
-             "decide_discussion", "decide_vote", "decide_shoot", "decide_generic"]:
-    act_graph.add_edge(node, END)
-
-act_graph_compiled = act_graph.compile(checkpointer=checkpointer)
-
-
-# ============================================================
-# 辅助函数 — 桥接旧的数据类类型以兼容 PromptBuilder
-# ============================================================
-
 def _to_agent_game_state(state: AgentState):
     """将字典类型的 AgentState 转换为 PromptBuilder 兼容的 AgentGameState 数据类。"""
     from core.game_state import AgentGameState, PlayerPerception
+
+    dead_player_ids = set()
+    for event in state.get("events", []):
+        if event.get("status") != "death_settlement":
+            continue
+        dead_player_ids.update(re.findall(r"\d+", event.get("content", "")))
 
     players = {}
     for pid, pdata in state["players"].items():
@@ -501,8 +439,6 @@ def _to_agent_game_state(state: AgentState):
             id=pdata.get("id", pid),
             name=pdata.get("name", f"玩家 {pid}"),
             role=Role(role_val) if role_val else None,
-            is_alive=pdata.get("is_alive", True),
-            is_sheriff=pdata.get("is_sheriff", False),
             notes=pdata.get("notes", ""),
         )
 
@@ -519,49 +455,41 @@ def _to_agent_game_state(state: AgentState):
     )
 
 
-# ============================================================
-# 图 API
-# ============================================================
-
 async def perceive(state: AgentState, request: dict) -> AgentState:
-    """通过感知图处理游戏事件。"""
-    agent_id = state.get("me_id", "unknown")
-    config = {"configurable": {"thread_id": agent_id}}
-    input_state = {**state, "request": request}
-    result = await perceive_graph_compiled.ainvoke(input_state, config)
-    return result
+    """处理一条来自服务端的公开事件。"""
+    return _parse_event({**state, "request": request})
 
 
 async def act(state: AgentState, request: dict) -> dict:
-    """通过行动图做出游戏决策。"""
-    agent_id = state.get("me_id", "unknown")
-    config = {"configurable": {"thread_id": agent_id}}
-
-    # 尝试从检查点获取现有状态；否则使用传入的状态
-    existing = await perceive_graph_compiled.aget_state(config)
-    if existing and existing.values:
-        base_state = existing.values
-    else:
-        base_state = state
-
+    """基于当前会话状态做出一次行动决策。"""
     input_state = {
-        **base_state,
+        **state,
         "phase": normalize_action_status(
-            request.get("status", base_state.get("phase", "")),
+            request.get("status", state.get("phase", "")),
             message=request.get("message", ""),
-            previous_phase=base_state.get("phase", ""),
+            previous_phase=state.get("phase", ""),
         ),
         "request": {
             **request,
             "status": normalize_action_status(
                 request.get("status", ""),
                 message=request.get("message", ""),
-                previous_phase=base_state.get("phase", ""),
+                previous_phase=state.get("phase", ""),
             ),
         },
     }
-    result = await act_graph_compiled.ainvoke(input_state, config)
-    return result
+    reflected_state = _reflect_node(input_state)
+    next_step = _route_by_phase(reflected_state)
+    decision_handlers = {
+        "decide_night_role": _decide_night_role,
+        "decide_wolf_gesture": _decide_wolf_gesture,
+        "decide_election": _decide_election,
+        "decide_discussion": _decide_discussion,
+        "decide_vote": _decide_vote,
+        "decide_shoot": _decide_shoot,
+        "decide_generic": _decide_generic,
+    }
+    return decision_handlers[next_step](reflected_state)
 
 
 # 向后兼容的别名导出
