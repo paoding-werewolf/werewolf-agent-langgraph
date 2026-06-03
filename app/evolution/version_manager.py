@@ -1,7 +1,9 @@
-"""evolution/version_manager.py — 策略版本管理
+"""evolution/version_manager.py — 策略版本管理门面（MySQL 持久化）
 
 封装 SkillLoader 中版本操作的高层 API，供 confirmation.py 和 API 层调用。
 """
+from typing import Dict, List, Optional, Any
+
 from evolution.config import EvolutionConfig
 from evolution.skill_loader import SkillLoader
 
@@ -21,6 +23,12 @@ class VersionManager:
     def rollback(self, skill_name: str, target_version: str) -> bool:
         return self.loader.rollback(skill_name, target_version)
 
+    def pin_version(self, skill_name: str, version: str, pinned: bool) -> bool:
+        return self.loader.pin_version(skill_name, version, pinned)
+
+    def delete_version(self, skill_name: str, version: str) -> bool:
+        return self.loader.delete_version(skill_name, version)
+
     def load_skill_full(self, skill_name: str, version: str = None) -> str:
         return self.loader.load_skill_full(skill_name, version) or ""
 
@@ -29,10 +37,6 @@ class VersionManager:
 
     def record_usage(self, skill_name: str, version: str, won: bool):
         self.loader.record_version_usage(skill_name, version, won)
-
-    def get_status(self, skill_name: str) -> dict:
-        meta = self.loader._load_versions_meta(skill_name)
-        return meta or {}
 
     def format_skills_for_prompt(self, my_role: str, phase: str) -> str:
         """组装注入 prompt 的策略文本（Layer 1 索引 + Layer 2 全文）。"""
