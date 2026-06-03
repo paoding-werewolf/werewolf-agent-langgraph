@@ -65,11 +65,12 @@ class BufferPool:
             session.close()
 
     def load_cluster(self, cluster_id: str) -> Optional[Dict]:
-        """加载指定 cluster 的全部建议。"""
+        """加载指定 cluster 的全部建议（cluster 或 confirmed 均可）。"""
         session = get_session()
         try:
-            item = session.query(EvolutionBufferItem).filter_by(
-                item_type="cluster", item_key=cluster_id
+            item = session.query(EvolutionBufferItem).filter(
+                EvolutionBufferItem.item_key == cluster_id,
+                EvolutionBufferItem.item_type.in_(["cluster", "confirmed"]),
             ).first()
             return item.payload_json if item else None
         finally:
@@ -195,14 +196,21 @@ class BufferPool:
             expired_count = session.query(func.count(EvolutionBufferItem.id)).filter_by(item_type="expired").scalar() or 0
 
             cluster_details = []
-            clusters = session.query(EvolutionBufferItem).filter_by(item_type="cluster").all()
-            for c in clusters:
-                cluster_details.append({
-                    "cluster_id": c.item_key,
-                    "suggestion_count": c.suggestion_count,
-                    "target_skill": c.target_skill_name or "",
-                    "avg_causal_strength": float(c.avg_causal_strength or 0),
-                })
+            confirmed_details = []
+            for item_type, detail_list in [("cluster", cluster_details), ("confirmed", confirmed_details)]:
+                items = session.query(EvolutionBufferItem).filter_by(item_type=item_type).all()
+                for c in items:
+                    detail_list.append({
+                        "cluster_id": c.item_key,
+                        "suggestion_count": c.suggestion_count,
+                        "target_skill": c.target_skill_name or "",
+                        "avg_causal_strength": float(c.avg_causal_strength or 0),
+                        "consistency_rate": float(c.consistency_rate or 0),
+                        "scene_tags": c.scene_tags_json or {},
+                        "preview_texts": c.preview_texts_json or [],
+                        "created_at": c.created_at.isoformat() if c.created_at else None,
+                        "updated_at": c.updated_at.isoformat() if c.updated_at else None,
+                    })
 
             return {
                 "pending_count": pending_count,
@@ -210,6 +218,7 @@ class BufferPool:
                 "confirmed_count": confirmed_count,
                 "expired_count": expired_count,
                 "clusters": cluster_details,
+                "confirmed_clusters": confirmed_details,
             }
         finally:
             session.close()

@@ -1206,7 +1206,7 @@ async def _evo_overview(request):
         from evolution.config import load_config
         from evolution.buffer_pool import BufferPool
         from evolution.db import get_session
-        from evolution.models import EvolutionSkill, EvolutionRuntimeState
+        from evolution.models import EvolutionSkill, EvolutionRuntimeState, EvolutionGameArchive
         from sqlalchemy import func
 
         cfg = load_config()
@@ -1216,6 +1216,7 @@ async def _evo_overview(request):
         session = get_session()
         try:
             skill_count = session.query(func.count(EvolutionSkill.id)).scalar() or 0
+            total_games = session.query(func.count(EvolutionGameArchive.id)).scalar() or 0
             curator_record = session.get(EvolutionRuntimeState, "curator")
             curator_last_run = (curator_record.payload_json or {}).get("last_run_at") if curator_record else None
         finally:
@@ -1227,6 +1228,7 @@ async def _evo_overview(request):
             "confirmed_count": status["confirmed_count"],
             "expired_count": status["expired_count"],
             "skill_count": skill_count,
+            "total_games": total_games,
             "curator_last_run": curator_last_run,
         })
     except Exception as e:
