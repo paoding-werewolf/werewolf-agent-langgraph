@@ -1,23 +1,18 @@
-"""evolution/clustering.py — 建议语义聚类
+"""evolution/clustering.py — 建议语义聚类（MySQL 持久化）
 
-将 pending/ 中的建议按场景标签分组，然后在组内做语义一致性检查。
+将 pending 中的建议按场景标签分组，然后在组内做语义一致性检查。
 """
-import yaml
-from pathlib import Path
-from typing import List, Dict, Optional
-from datetime import datetime, timezone
-from collections import Counter
+from typing import List, Dict
 
 from evolution.config import EvolutionConfig
+from evolution.buffer_pool import BufferPool
 from agents.llm_caller import LLMCaller
 
 
 class SuggestionClusterer:
-    def __init__(self, cfg: EvolutionConfig):
+    def __init__(self, cfg: EvolutionConfig, pool: BufferPool):
         self.cfg = cfg
-        self.buffer_root = Path(cfg.buffer.path)
-        self.clusters_dir = self.buffer_root / "clusters"
-        self.pending_dir = self.buffer_root / "pending"
+        self.pool = pool
 
         self.cluster_llm = LLMCaller()
         if cfg.clustering_model:
@@ -26,20 +21,16 @@ class SuggestionClusterer:
     def process_pending(self) -> List[Dict]:
         """处理所有 pending 建议，归入或创建 cluster。"""
         processed = []
-        pending_files = sorted(self.pending_dir.glob("*.yaml"))
+        pending = self.pool.load_pending()
 
-        for pf in pending_files:
-            with open(pf) as f:
-                suggestion = yaml.safe_load(f)
-
+        for suggestion in pending:
             result = self._assign_to_cluster(suggestion)
             processed.append({
                 "suggestion_id": suggestion.get("suggestion_id"),
                 "action": result["action"],
                 "cluster_id": result.get("cluster_id"),
             })
-
-            pf.unlink()
+            self.pool.delete_pending(suggestion.get("suggestion_id", ""))
 
         return processed
 
@@ -51,22 +42,20 @@ class SuggestionClusterer:
         best_match = None
         best_score = 0
 
-        for cf in self.clusters_dir.glob("*.yaml"):
-            with open(cf) as f:
-                cluster = yaml.safe_load(f)
-
+        for cluster_id in self.pool.list_clusters():
+            cluster = self.pool.load_cluster(cluster_id)
+            if not cluster:
+                continue
             score = self._scene_tag_overlap(scene_tags, cluster.get("scene_tags", {}))
             if score > best_score and score >= self.cfg.buffer.semantic_similarity_threshold:
                 best_score = score
-                best_match = cf.stem
+                best_match = cluster_id
 
         if best_match:
-            cluster_file = self.clusters_dir / f"{best_match}.yaml"
-            with open(cluster_file) as f:
-                cluster = yaml.safe_load(f)
-
-            if self._check_semantic_consistency(suggestion, cluster):
+            cluster = self.pool.load_cluster(best_match)
+            if cluster and self._check_semantic_consistency(suggestion, cluster):
                 cluster["suggestions"].append(suggestion)
+                from datetime import datetime, timezone
                 cluster["updated_at"] = datetime.now(timezone.utc).isoformat()
                 cluster["avg_causal_strength"] = self._avg_causal_strength(cluster["suggestions"])
                 cluster["consistency_rate"] = self._consistency_rate(cluster["suggestions"])
@@ -75,9 +64,7 @@ class SuggestionClusterer:
                     cluster["suggestions"].sort(key=lambda s: s.get("created_at", ""))
                     cluster["suggestions"] = cluster["suggestions"][-self.cfg.buffer.max_cluster_size:]
 
-                with open(cluster_file, "w") as f:
-                    yaml.dump(cluster, f, allow_unicode=True, default_flow_style=False)
-
+                self.pool.save_cluster(best_match, cluster)
                 return {"action": "added_to_cluster", "cluster_id": best_match}
             else:
                 return self._create_cluster(suggestion, scene_tags, target_skill)
@@ -86,8 +73,10 @@ class SuggestionClusterer:
 
     def _create_cluster(self, suggestion: Dict, scene_tags: Dict, target_skill: str) -> Dict:
         """创建新 cluster。"""
-        cluster_id = f"cluster_{target_skill}_{self._scene_tag_key(scene_tags)}"
-        cluster_file = self.clusters_dir / f"{cluster_id}.yaml"
+        import uuid
+        from datetime import datetime, timezone
+
+        cluster_id = f"cluster_{target_skill}_{self._scene_tag_key(scene_tags)}_{uuid.uuid4().hex[:6]}"
 
         cluster = {
             "cluster_id": cluster_id,
@@ -100,9 +89,7 @@ class SuggestionClusterer:
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
 
-        with open(cluster_file, "w") as f:
-            yaml.dump(cluster, f, allow_unicode=True, default_flow_style=False)
-
+        self.pool.save_cluster(cluster_id, cluster)
         return {"action": "new_cluster", "cluster_id": cluster_id}
 
     def _scene_tag_overlap(self, tags_a: Dict, tags_b: Dict) -> float:
@@ -172,7 +159,7 @@ class SuggestionClusterer:
             answer = (resp.choices[0].message.content or "").strip().lower()
             return "consistent" in answer
         except Exception:
-            return True
+            return False
 
     def _avg_causal_strength(self, suggestions: List[Dict]) -> float:
         strengths = [s.get("suggestion", {}).get("causal_strength", 0) for s in suggestions]
@@ -182,6 +169,7 @@ class SuggestionClusterer:
         """计算 cluster 内建议方向的一致率。"""
         if not suggestions:
             return 0
+        from collections import Counter
         directions = [s.get("suggestion", {}).get("direction", "") for s in suggestions]
         counts = Counter(directions)
         most_common_count = counts.most_common(1)[0][1]

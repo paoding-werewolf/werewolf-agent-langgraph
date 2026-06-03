@@ -1,29 +1,24 @@
-"""evolution/buffer_pool.py — 策略建议缓冲池
+"""evolution/buffer_pool.py — 策略建议缓冲池（MySQL 持久化）
 
 职责：
   1. 接收反思引擎产出的建议
-  2. 按场景标签路由到 pending/ 或 clusters/
+  2. 按场景标签路由到 pending 或 cluster
   3. 管理建议生命周期（过期清理）
 """
-import json
-import yaml
-import shutil
-from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Optional, Any
 
+from sqlalchemy import func
+
 from evolution.config import EvolutionConfig
+from evolution.db import get_session
+from evolution.models import EvolutionBufferItem
 from evolution.reflection_engine import ReflectionResult
 
 
 class BufferPool:
     def __init__(self, cfg: EvolutionConfig):
         self.cfg = cfg
-        self.root = Path(cfg.buffer.path)
-        self.pending_dir = self.root / "pending"
-        self.clusters_dir = self.root / "clusters"
-        self.confirmed_dir = self.root / "confirmed"
-        self.expired_dir = self.root / "expired"
 
     def ingest(self, result: ReflectionResult) -> str:
         """接收一条反思结果，写入缓冲池。"""
@@ -32,12 +27,192 @@ class BufferPool:
         if sug.match_level in ("low", "strategy_gap"):
             return "skipped"
 
-        data = self._result_to_dict(result)
-        file_path = self.pending_dir / f"{result.suggestion_id}.yaml"
-        with open(file_path, "w") as f:
-            yaml.dump(data, f, allow_unicode=True, default_flow_style=False)
+        payload = self._result_to_dict(result)
+        preview_texts = []
+        text = (payload.get("suggestion") or {}).get("text", "")
+        if text:
+            preview_texts.append(text[:80])
 
-        return "buffered"
+        session = get_session()
+        try:
+            item = EvolutionBufferItem(
+                item_type="pending",
+                item_key=result.suggestion_id,
+                target_skill_name=sug.target_skill,
+                suggestion_count=1,
+                avg_causal_strength=sug.causal_strength,
+                consistency_rate=1.0,
+                scene_tags_json=payload.get("scene_tags", {}),
+                preview_texts_json=preview_texts,
+                payload_json=payload,
+            )
+            session.add(item)
+            session.commit()
+            return "buffered"
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def load_pending(self) -> List[Dict]:
+        """加载所有 pending 建议。"""
+        session = get_session()
+        try:
+            items = session.query(EvolutionBufferItem).filter_by(item_type="pending").all()
+            return [item.payload_json for item in items]
+        finally:
+            session.close()
+
+    def load_cluster(self, cluster_id: str) -> Optional[Dict]:
+        """加载指定 cluster 的全部建议。"""
+        session = get_session()
+        try:
+            item = session.query(EvolutionBufferItem).filter_by(
+                item_type="cluster", item_key=cluster_id
+            ).first()
+            return item.payload_json if item else None
+        finally:
+            session.close()
+
+    def list_clusters(self) -> List[str]:
+        """列出所有 cluster ID。"""
+        session = get_session()
+        try:
+            items = session.query(EvolutionBufferItem).filter_by(item_type="cluster").all()
+            return [item.item_key for item in items]
+        finally:
+            session.close()
+
+    def save_cluster(self, cluster_id: str, data: Dict):
+        """创建或更新 cluster。"""
+        suggestions = data.get("suggestions", [])
+        preview_texts = []
+        for s in suggestions[:3]:
+            text = (s.get("suggestion") or {}).get("text", "")
+            if text:
+                preview_texts.append(text[:80])
+
+        session = get_session()
+        try:
+            item = session.query(EvolutionBufferItem).filter_by(
+                item_type="cluster", item_key=cluster_id
+            ).first()
+            if item:
+                item.suggestion_count = len(suggestions)
+                item.avg_causal_strength = data.get("avg_causal_strength", 0)
+                item.consistency_rate = data.get("consistency_rate", 0)
+                item.scene_tags_json = data.get("scene_tags", {})
+                item.preview_texts_json = preview_texts
+                item.target_skill_name = data.get("target_skill", "")
+                item.payload_json = data
+                item.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            else:
+                item = EvolutionBufferItem(
+                    item_type="cluster",
+                    item_key=cluster_id,
+                    cluster_id=cluster_id,
+                    target_skill_name=data.get("target_skill", ""),
+                    suggestion_count=len(suggestions),
+                    avg_causal_strength=data.get("avg_causal_strength", 0),
+                    consistency_rate=data.get("consistency_rate", 0),
+                    scene_tags_json=data.get("scene_tags", {}),
+                    preview_texts_json=preview_texts,
+                    payload_json=data,
+                )
+                session.add(item)
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def delete_pending(self, suggestion_id: str):
+        """删除已处理的 pending 建议。"""
+        session = get_session()
+        try:
+            item = session.query(EvolutionBufferItem).filter_by(
+                item_type="pending", item_key=suggestion_id
+            ).first()
+            if item:
+                session.delete(item)
+                session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def move_to_confirmed(self, cluster_id: str):
+        """将 cluster 移入 confirmed。"""
+        session = get_session()
+        try:
+            item = session.query(EvolutionBufferItem).filter_by(
+                item_type="cluster", item_key=cluster_id
+            ).first()
+            if item:
+                item.item_type = "confirmed"
+                item.status = "confirmed"
+                item.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def expire_old_suggestions(self) -> int:
+        """清理过期建议，返回清理数量。"""
+        cutoff = datetime.now(timezone.utc) - timedelta(days=self.cfg.buffer.max_age_days)
+        cutoff_naive = cutoff.replace(tzinfo=None)
+
+        session = get_session()
+        try:
+            items = session.query(EvolutionBufferItem).filter_by(item_type="pending").all()
+            count = 0
+            for item in items:
+                if item.created_at and item.created_at < cutoff_naive:
+                    item.item_type = "expired"
+                    item.status = "expired"
+                    count += 1
+            if count:
+                session.commit()
+            return count
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def get_status(self) -> Dict:
+        """返回缓冲池状态摘要。"""
+        session = get_session()
+        try:
+            pending_count = session.query(func.count(EvolutionBufferItem.id)).filter_by(item_type="pending").scalar() or 0
+            cluster_count = session.query(func.count(EvolutionBufferItem.id)).filter_by(item_type="cluster").scalar() or 0
+            confirmed_count = session.query(func.count(EvolutionBufferItem.id)).filter_by(item_type="confirmed").scalar() or 0
+            expired_count = session.query(func.count(EvolutionBufferItem.id)).filter_by(item_type="expired").scalar() or 0
+
+            cluster_details = []
+            clusters = session.query(EvolutionBufferItem).filter_by(item_type="cluster").all()
+            for c in clusters:
+                cluster_details.append({
+                    "cluster_id": c.item_key,
+                    "suggestion_count": c.suggestion_count,
+                    "target_skill": c.target_skill_name or "",
+                    "avg_causal_strength": float(c.avg_causal_strength or 0),
+                })
+
+            return {
+                "pending_count": pending_count,
+                "cluster_count": cluster_count,
+                "confirmed_count": confirmed_count,
+                "expired_count": expired_count,
+                "clusters": cluster_details,
+            }
+        finally:
+            session.close()
 
     def _result_to_dict(self, result: ReflectionResult) -> Dict:
         """将 ReflectionResult 转为可序列化的 dict。"""
@@ -77,78 +252,4 @@ class BufferPool:
             },
             "in_game_flags": result.in_game_flags,
             "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-
-    def load_pending(self) -> List[Dict]:
-        """加载所有 pending 建议。"""
-        results = []
-        for f in self.pending_dir.glob("*.yaml"):
-            with open(f) as fh:
-                data = yaml.safe_load(fh)
-                data["_file"] = str(f)
-                results.append(data)
-        return results
-
-    def load_cluster(self, cluster_id: str) -> Optional[Dict]:
-        """加载指定 cluster 的全部建议。"""
-        cluster_file = self.clusters_dir / f"{cluster_id}.yaml"
-        if not cluster_file.exists():
-            return None
-        with open(cluster_file) as f:
-            return yaml.safe_load(f)
-
-    def list_clusters(self) -> List[str]:
-        """列出所有 cluster ID。"""
-        return [f.stem for f in self.clusters_dir.glob("*.yaml")]
-
-    def move_to_confirmed(self, cluster_id: str):
-        """将 cluster 移入 confirmed/。"""
-        src = self.clusters_dir / f"{cluster_id}.yaml"
-        dst = self.confirmed_dir / f"{cluster_id}.yaml"
-        if src.exists():
-            shutil.move(str(src), str(dst))
-
-    def expire_old_suggestions(self) -> int:
-        """清理过期建议，返回清理数量。"""
-        cutoff = datetime.now(timezone.utc) - timedelta(days=self.cfg.buffer.max_age_days)
-        count = 0
-
-        for f in self.pending_dir.glob("*.yaml"):
-            with open(f) as fh:
-                data = yaml.safe_load(fh)
-            created = data.get("created_at", "")
-            if created:
-                try:
-                    created_dt = datetime.fromisoformat(created)
-                    if created_dt < cutoff:
-                        shutil.move(str(f), str(self.expired_dir / f.name))
-                        count += 1
-                except (ValueError, TypeError):
-                    pass
-        return count
-
-    def get_status(self) -> Dict:
-        """返回缓冲池状态摘要。"""
-        pending_count = len(list(self.pending_dir.glob("*.yaml")))
-        cluster_count = len(list(self.clusters_dir.glob("*.yaml")))
-        confirmed_count = len(list(self.confirmed_dir.glob("*.yaml")))
-        expired_count = len(list(self.expired_dir.glob("*.yaml")))
-
-        cluster_details = []
-        for cf in self.clusters_dir.glob("*.yaml"):
-            with open(cf) as f:
-                data = yaml.safe_load(f)
-            cluster_details.append({
-                "cluster_id": cf.stem,
-                "suggestion_count": len(data.get("suggestions", [])),
-                "target_skill": data.get("target_skill", ""),
-                "avg_causal_strength": data.get("avg_causal_strength", 0),
-            })
-
-        return {
-            "pending_count": pending_count,
-            "cluster_count": cluster_count,
-            "confirmed_count": confirmed_count,
-            "expired_count": expired_count,
-            "clusters": cluster_details,
         }

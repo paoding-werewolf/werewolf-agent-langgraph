@@ -1,18 +1,15 @@
-"""evolution/curator.py — 自主策展人
+"""evolution/curator.py — 自主策展人（MySQL 持久化）
 
 两阶段策略库维护：
   阶段一：确定性状态转移（active → stale → archived）
   阶段二：LLM 审查（keep / patch / consolidate / archive）
 """
-import json
-import yaml
-import shutil
-import tarfile
-from pathlib import Path
-from typing import Dict, List, Optional
 from datetime import datetime, timezone, timedelta
+from typing import Dict, List, Optional
 
-from evolution.config import EvolutionConfig, AGENT_HOME
+from evolution.config import EvolutionConfig
+from evolution.db import get_session
+from evolution.models import EvolutionSkill, EvolutionSkillVersion, EvolutionRuntimeState
 from evolution.skill_loader import SkillLoader
 from agents.llm_caller import LLMCaller
 
@@ -21,9 +18,6 @@ class Curator:
     def __init__(self, cfg: EvolutionConfig):
         self.cfg = cfg
         self.loader = SkillLoader(cfg)
-        self.skills_root = Path(cfg.skills_path)
-        self.backup_dir = self.skills_root / ".curator_backups"
-        self.state_file = AGENT_HOME / "memory" / "curator_state.json"
 
     def should_run(self, is_game_in_progress: bool = False) -> bool:
         """判断是否应该触发 Curator。"""
@@ -46,7 +40,6 @@ class Curator:
         if hours_since_run < self.cfg.curator.interval_hours:
             return False
 
-        # Check idle: if any game ended recently (within min_idle_hours), skip
         last_game_end = state.get("last_game_end_at")
         if last_game_end:
             hours_since_game = (now - datetime.fromisoformat(last_game_end)).total_seconds() / 3600
@@ -57,8 +50,6 @@ class Curator:
 
     def run(self) -> Dict:
         """执行 Curator 审查。返回操作摘要。"""
-        self._snapshot()
-
         summary = {"phase1": {}, "phase2": {}}
 
         summary["phase1"] = self._phase1_state_transitions()
@@ -72,35 +63,42 @@ class Curator:
         """确定性状态转移：active → stale → archived。"""
         result = {"staled": [], "archived": []}
         cfg = self.cfg.versioning
+        now = datetime.now(timezone.utc)
 
-        for skill_dir in self._iter_skill_dirs():
-            meta_path = skill_dir / ".versions.json"
-            if not meta_path.exists():
-                continue
-
-            with open(meta_path) as f:
-                meta = json.load(f)
-
-            for v_name, v_data in meta.get("versions", {}).items():
-                if v_data.get("pinned"):
+        session = get_session()
+        try:
+            versions = session.query(EvolutionSkillVersion).all()
+            for v in versions:
+                if v.pinned:
                     continue
 
-                last_used = v_data.get("usage", {}).get("last_used") or v_data.get("created_at", "")
+                last_used = v.last_used_at or v.created_at
                 if not last_used:
                     continue
 
-                days_since = (datetime.now(timezone.utc) - datetime.fromisoformat(last_used)).days
+                if last_used.tzinfo is None:
+                    last_used = last_used.replace(tzinfo=timezone.utc)
 
-                if v_data.get("status") == "active" and days_since >= cfg.demotion_stale_days:
-                    v_data["status"] = "stale"
-                    result["staled"].append(f"{skill_dir.name}/{v_name}")
+                days_since = (now - last_used).days
 
-                elif v_data.get("status") == "stale" and days_since >= cfg.demotion_archive_days:
-                    v_data["status"] = "archived"
-                    result["archived"].append(f"{skill_dir.name}/{v_name}")
+                if v.status == "active" and days_since >= cfg.demotion_stale_days:
+                    v.status = "stale"
+                    skill = session.query(EvolutionSkill).filter_by(id=v.skill_id).first()
+                    skill_name = skill.skill_name if skill else str(v.skill_id)
+                    result["staled"].append(f"{skill_name}/{v.version}")
 
-            with open(meta_path, "w") as f:
-                json.dump(meta, f, indent=2, ensure_ascii=False)
+                elif v.status == "stale" and days_since >= cfg.demotion_archive_days:
+                    v.status = "archived"
+                    skill = session.query(EvolutionSkill).filter_by(id=v.skill_id).first()
+                    skill_name = skill.skill_name if skill else str(v.skill_id)
+                    result["archived"].append(f"{skill_name}/{v.version}")
+
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
 
         return result
 
@@ -112,68 +110,68 @@ class Curator:
         review_llm.model = self.cfg.clustering_model
 
         skills_reviewed = 0
-        for skill_dir in self._iter_skill_dirs():
-            if skills_reviewed >= self.cfg.curator.max_iterations:
-                break
+        session = get_session()
+        try:
+            skills = session.query(EvolutionSkill).all()
+            for skill in skills:
+                if skills_reviewed >= self.cfg.curator.max_iterations:
+                    break
 
-            meta_path = skill_dir / ".versions.json"
-            if not meta_path.exists():
-                continue
+                current_v = session.query(EvolutionSkillVersion).filter_by(
+                    skill_id=skill.id, version=skill.current_default
+                ).first()
+                if not current_v:
+                    continue
 
-            with open(meta_path) as f:
-                meta = json.load(f)
+                if current_v.pinned or current_v.source == "bundled":
+                    continue
 
-            current_v = meta.get("current_default", "v1")
-            v_data = meta.get("versions", {}).get(current_v, {})
+                content = current_v.content_markdown
+                usage = {
+                    "games_played": current_v.games_played,
+                    "wins": current_v.wins,
+                    "win_rate": float(current_v.win_rate or 0),
+                    "last_used": current_v.last_used_at.isoformat() if current_v.last_used_at else "N/A",
+                }
 
-            if v_data.get("pinned") or v_data.get("source") == "bundled":
-                continue
+                decision = self._llm_review_skill(content, usage, review_llm)
+                result["reviewed"] += 1
+                skills_reviewed += 1
 
-            v_file = skill_dir / f"{current_v}.md"
-            if not v_file.exists():
-                continue
-
-            with open(v_file) as f:
-                content = f.read()
-
-            usage = v_data.get("usage", {})
-            decision = self._llm_review_skill(content, usage, review_llm)
-
-            result["reviewed"] += 1
-            skills_reviewed += 1
-
-            if decision == "keep":
-                result["kept"] += 1
-            elif decision == "patch":
-                patched_content = self._llm_patch_skill(content, usage, review_llm)
-                if patched_content:
-                    with open(v_file, "w") as f:
-                        f.write(patched_content)
-                    result["patched"] += 1
-                else:
+                if decision == "keep":
                     result["kept"] += 1
-            elif decision == "consolidate":
-                consolidated = self._llm_consolidate_skill(
-                    skill_dir.name, content, review_llm
-                )
-                if consolidated:
-                    new_version = self.loader.create_new_version(
-                        skill_name=meta.get("skill_name", skill_dir.name),
-                        content=consolidated["content"],
-                        source="curator_consolidation",
-                        trigger_cluster=consolidated.get("merged_with", ""),
+                elif decision == "patch":
+                    patched_content = self._llm_patch_skill(content, usage, review_llm)
+                    if patched_content:
+                        current_v.content_markdown = patched_content
+                        result["patched"] += 1
+                    else:
+                        result["kept"] += 1
+                elif decision == "consolidate":
+                    consolidated = self._llm_consolidate_skill(
+                        skill.skill_name, content, review_llm
                     )
-                    v_data["status"] = "archived"
-                    with open(meta_path, "w") as f:
-                        json.dump(meta, f, indent=2, ensure_ascii=False)
-                    result["consolidated"] += 1
-                else:
-                    result["kept"] += 1
-            elif decision == "archive":
-                v_data["status"] = "archived"
-                result["archived"] += 1
-                with open(meta_path, "w") as f:
-                    json.dump(meta, f, indent=2, ensure_ascii=False)
+                    if consolidated:
+                        self.loader.create_new_version(
+                            skill_name=skill.skill_name,
+                            content=consolidated["content"],
+                            source="curator_consolidation",
+                            trigger_cluster=consolidated.get("merged_with", ""),
+                        )
+                        current_v.status = "archived"
+                        result["consolidated"] += 1
+                    else:
+                        result["kept"] += 1
+                elif decision == "archive":
+                    current_v.status = "archived"
+                    result["archived"] += 1
+
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
 
         return result
 
@@ -251,35 +249,34 @@ class Curator:
     def _llm_consolidate_skill(self, skill_name: str, content: str,
                                 llm: LLMCaller) -> Optional[Dict]:
         """LLM 将当前策略与重叠策略合并。返回 {"content": str, "merged_with": str} 或 None。"""
-        skill_dir = self.loader._find_skill_dir(skill_name)
-        if not skill_dir:
-            return None
+        session = get_session()
+        try:
+            skill = session.query(EvolutionSkill).filter_by(skill_name=skill_name).first()
+            if not skill:
+                return None
 
-        role_dir = skill_dir.parent
-        sibling_skills = []
-        for sibling in role_dir.iterdir():
-            if sibling.is_dir() and sibling.name != skill_dir.name:
-                sibling_meta_path = sibling / ".versions.json"
-                if sibling_meta_path.exists():
-                    with open(sibling_meta_path) as f:
-                        sibling_meta = json.load(f)
-                    sibling_v = sibling_meta.get("current_default", "v1")
-                    sibling_file = sibling / f"{sibling_v}.md"
-                    if sibling_file.exists():
-                        sibling_content = sibling_file.read_text()
-                        sibling_skills.append({
-                            "name": sibling_meta.get("skill_name", sibling.name),
-                            "content": sibling_content[:1500],
-                        })
+            siblings = session.query(EvolutionSkill).filter_by(role=skill.role).all()
+            sibling_skills = []
+            for s in siblings:
+                if s.id == skill.id:
+                    continue
+                current_v = session.query(EvolutionSkillVersion).filter_by(
+                    skill_id=s.id, version=s.current_default
+                ).first()
+                if current_v and current_v.content_markdown:
+                    sibling_skills.append({
+                        "name": s.skill_name,
+                        "content": current_v.content_markdown[:1500],
+                    })
 
-        if not sibling_skills:
-            return None
+            if not sibling_skills:
+                return None
 
-        siblings_text = "\n\n".join(
-            f"### 策略: {s['name']}\n{s['content']}" for s in sibling_skills[:3]
-        )
+            siblings_text = "\n\n".join(
+                f"### 策略: {s['name']}\n{s['content']}" for s in sibling_skills[:3]
+            )
 
-        prompt = f"""判断以下策略是否与相邻策略有显著重叠，如果有则合并。
+            prompt = f"""判断以下策略是否与相邻策略有显著重叠，如果有则合并。
 
 当前策略 ({skill_name})：
 {content[:2000]}
@@ -290,68 +287,54 @@ class Curator:
 如果存在显著重叠（覆盖相似决策空间），输出合并后的完整策略文档（Markdown + YAML frontmatter）。
 如果没有显著重叠，只回答 "no_merge"。"""
 
-        try:
-            resp = llm.client.chat.completions.create(
-                model=llm.model,
-                messages=[
-                    {"role": "system", "content": "你是策略库策展专家。判断重叠并合并。"},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.2,
-            )
-            result = (resp.choices[0].message.content or "").strip()
-            if "no_merge" in result.lower():
-                return None
-            if len(result) > 50 and "---" in result:
-                return {
-                    "content": result,
-                    "merged_with": ", ".join(s["name"] for s in sibling_skills[:3]),
-                }
-        except Exception:
-            pass
-        return None
-
-    def _snapshot(self):
-        """创建技能库快照。"""
-        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        snapshot_dir = self.backup_dir / ts
-        snapshot_dir.mkdir(parents=True, exist_ok=True)
-
-        tar_path = snapshot_dir / "skills.tar.gz"
-        backup_dir_name = self.backup_dir.name
-
-        def _exclude_backups(tarinfo):
-            if backup_dir_name in tarinfo.name:
-                return None
-            return tarinfo
-
-        with tarfile.open(str(tar_path), "w:gz") as tar:
-            tar.add(str(self.skills_root), arcname="skills", filter=_exclude_backups)
-
-        snapshots = sorted(self.backup_dir.iterdir())
-        while len(snapshots) > 5:
-            oldest = snapshots.pop(0)
-            shutil.rmtree(oldest)
-
-    def _iter_skill_dirs(self):
-        """遍历所有策略目录。"""
-        for role_dir in self.skills_root.iterdir():
-            if not role_dir.is_dir() or role_dir.name.startswith("."):
-                continue
-            for skill_dir in role_dir.iterdir():
-                if skill_dir.is_dir():
-                    yield skill_dir
+            try:
+                resp = llm.client.chat.completions.create(
+                    model=llm.model,
+                    messages=[
+                        {"role": "system", "content": "你是策略库策展专家。判断重叠并合并。"},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.2,
+                )
+                result = (resp.choices[0].message.content or "").strip()
+                if "no_merge" in result.lower():
+                    return None
+                if len(result) > 50 and "---" in result:
+                    return {
+                        "content": result,
+                        "merged_with": ", ".join(s["name"] for s in sibling_skills[:3]),
+                    }
+            except Exception:
+                pass
+            return None
+        finally:
+            session.close()
 
     def _load_state(self) -> Dict:
-        if self.state_file.exists():
-            with open(self.state_file) as f:
-                return json.load(f)
-        return {}
+        session = get_session()
+        try:
+            record = session.get(EvolutionRuntimeState, "curator")
+            return dict(record.payload_json) if record else {}
+        finally:
+            session.close()
 
     def _save_state(self, state: Dict):
-        """Merge into existing state and write. Preserves fields set by other writers (e.g. last_game_end_at)."""
+        """Merge into existing state and write."""
         existing = self._load_state()
         existing.update(state)
-        self.state_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.state_file, "w") as f:
-            json.dump(state, f)
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+        session = get_session()
+        try:
+            record = session.get(EvolutionRuntimeState, "curator")
+            if record:
+                record.payload_json = existing
+                record.updated_at = now
+            else:
+                session.add(EvolutionRuntimeState(state_key="curator", payload_json=existing))
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()

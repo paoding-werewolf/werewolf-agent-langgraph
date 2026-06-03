@@ -6,10 +6,7 @@
 
 特殊通道：高因果强度快速确认（causal_strength ≥ 0.8 → 只需 2 次）
 """
-import yaml
-from pathlib import Path
-from typing import Dict, Optional
-from datetime import datetime, timezone
+from typing import Dict
 
 from evolution.config import EvolutionConfig
 from evolution.buffer_pool import BufferPool
