@@ -96,7 +96,7 @@ def _extract_sheriff_from_events(events, current_sheriff):
                 return match.group(1)
     return current_sheriff
 
-def _reflect_node(state: AgentState) -> AgentState:
+async def _reflect_node(state: AgentState) -> AgentState:
     """AI 内部反思：分析游戏状态并形成思路。"""
     builder = PromptBuilder(Role(state["my_role"]), state["me_id"])
 
@@ -111,7 +111,7 @@ def _reflect_node(state: AgentState) -> AgentState:
     gs = _to_agent_game_state(state)
     full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, "")
 
-    reflection = llm.call_with_log_sync(
+    reflection = await llm.call_with_log(
         state["me_id"],
         f"{state['phase']}_reflect",
         "你是一名狼人杀逻辑大师。专注于推理。",
@@ -163,7 +163,7 @@ def _route_by_phase(state: AgentState) -> Literal[
     return "decide_generic"
 
 
-def _decide_night_role(state: AgentState) -> AgentState:
+async def _decide_night_role(state: AgentState) -> AgentState:
     """守卫/预言家/女巫的夜间行动。"""
     builder = PromptBuilder(Role(state["my_role"]), state["me_id"])
     gs = _to_agent_game_state(state)
@@ -188,7 +188,7 @@ def _decide_night_role(state: AgentState) -> AgentState:
 
     full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, state["last_thought"])
 
-    action = llm.decide_with_tools_sync(
+    action = await llm.decide_with_tools(
         state["me_id"], f"{state['phase']}_act",
         "你是一名果断的狼人杀玩家。使用提供的工具。",
         full_prompt,
@@ -197,7 +197,7 @@ def _decide_night_role(state: AgentState) -> AgentState:
     return {**state, "next_action": action}
 
 
-def _decide_wolf_gesture(state: AgentState) -> AgentState:
+async def _decide_wolf_gesture(state: AgentState) -> AgentState:
     """狼人夜间交流。"""
     builder = PromptBuilder(Role(state["my_role"]), state["me_id"])
     gs = _to_agent_game_state(state)
@@ -223,7 +223,7 @@ def _decide_wolf_gesture(state: AgentState) -> AgentState:
 
     full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, state["last_thought"])
 
-    action = llm.decide_with_tools_sync(
+    action = await llm.decide_with_tools(
         state["me_id"], f"{state['phase']}_act",
         "你是狼人阵营的玩家。使用工具进行交流并执行行动。",
         full_prompt,
@@ -232,7 +232,7 @@ def _decide_wolf_gesture(state: AgentState) -> AgentState:
     return {**state, "next_action": action}
 
 
-def _decide_election(state: AgentState) -> AgentState:
+async def _decide_election(state: AgentState) -> AgentState:
     """警长选举决策。"""
     builder = PromptBuilder(Role(state["my_role"]), state["me_id"])
     gs = _to_agent_game_state(state)
@@ -256,7 +256,7 @@ def _decide_election(state: AgentState) -> AgentState:
 
     full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, state["last_thought"])
 
-    action = llm.decide_with_tools_sync(
+    action = await llm.decide_with_tools(
         state["me_id"], f"{state['phase']}_act",
         "你是狼人杀玩家。使用可用工具决定你的竞选行动。",
         full_prompt,
@@ -265,7 +265,7 @@ def _decide_election(state: AgentState) -> AgentState:
     return {**state, "next_action": action}
 
 
-def _decide_discussion(state: AgentState) -> AgentState:
+async def _decide_discussion(state: AgentState) -> AgentState:
     """白天讨论：发言和分析。"""
     builder = PromptBuilder(Role(state["my_role"]), state["me_id"])
     gs = _to_agent_game_state(state)
@@ -295,7 +295,7 @@ def _decide_discussion(state: AgentState) -> AgentState:
 
     full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, state["last_thought"])
 
-    action = llm.decide_with_tools_sync(
+    action = await llm.decide_with_tools(
         state["me_id"], f"{state['phase']}_act",
         "你是处于白天讨论阶段的狼人杀玩家。使用 speak 或 pass_turn。",
         full_prompt,
@@ -304,7 +304,7 @@ def _decide_discussion(state: AgentState) -> AgentState:
     return {**state, "next_action": action}
 
 
-def _decide_vote(state: AgentState) -> AgentState:
+async def _decide_vote(state: AgentState) -> AgentState:
     """放逐投票阶段。"""
     builder = PromptBuilder(Role(state["my_role"]), state["me_id"])
     gs = _to_agent_game_state(state)
@@ -333,7 +333,7 @@ def _decide_vote(state: AgentState) -> AgentState:
 
     full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, state["last_thought"])
 
-    action = llm.decide_with_tools_sync(
+    action = await llm.decide_with_tools(
         state["me_id"], f"{state['phase']}_act",
         "你是正在进行放逐投票的狼人杀玩家。使用 vote 或 pass_turn。",
         full_prompt,
@@ -342,7 +342,7 @@ def _decide_vote(state: AgentState) -> AgentState:
     return {**state, "next_action": action}
 
 
-def _decide_shoot(state: AgentState) -> AgentState:
+async def _decide_shoot(state: AgentState) -> AgentState:
     """猎人/狼王的开枪技能。"""
     builder = PromptBuilder(Role(state["my_role"]), state["me_id"])
     gs = _to_agent_game_state(state)
@@ -370,7 +370,7 @@ def _decide_shoot(state: AgentState) -> AgentState:
 
     full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, state["last_thought"])
 
-    action = llm.decide_with_tools_sync(
+    action = await llm.decide_with_tools(
         state["me_id"], f"{state['phase']}_act",
         "你正在使用开枪技能。使用 shoot 或 pass_turn。",
         full_prompt,
@@ -379,7 +379,7 @@ def _decide_shoot(state: AgentState) -> AgentState:
     return {**state, "next_action": action}
 
 
-def _decide_generic(state: AgentState) -> AgentState:
+async def _decide_generic(state: AgentState) -> AgentState:
     """没有特定处理阶段的回退决策。"""
     builder = PromptBuilder(Role(state["my_role"]), state["me_id"])
     gs = _to_agent_game_state(state)
@@ -410,7 +410,7 @@ def _decide_generic(state: AgentState) -> AgentState:
 
     full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, state["last_thought"])
 
-    action = llm.decide_with_tools_sync(
+    action = await llm.decide_with_tools(
         state["me_id"], f"{state['phase']}_act",
         "你是狼人杀玩家。使用可用工具。",
         full_prompt,
@@ -475,7 +475,7 @@ async def act(state: AgentState, request: dict) -> dict:
             ),
         },
     }
-    reflected_state = _reflect_node(input_state)
+    reflected_state = await _reflect_node(input_state)
     next_step = _route_by_phase(reflected_state)
     decision_handlers = {
         "decide_night_role": _decide_night_role,
@@ -486,7 +486,7 @@ async def act(state: AgentState, request: dict) -> dict:
         "decide_shoot": _decide_shoot,
         "decide_generic": _decide_generic,
     }
-    return decision_handlers[next_step](reflected_state)
+    return await decision_handlers[next_step](reflected_state)
 
 
 # 向后兼容的别名导出
