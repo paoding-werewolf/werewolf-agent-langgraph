@@ -435,7 +435,7 @@ async def _run_post_game_pipeline(state: dict, result: str,
                                    session_id: str, req_id: str):
     """对局结束后完整管道：反思 → 缓冲 → 记忆更新。"""
     try:
-        from evolution.config import load_config, ensure_directories
+        from evolution.config import load_config
         from evolution.reflection_engine import ReflectionEngine, format_game_trace
         from evolution.buffer_pool import BufferPool
         from evolution.clustering import SuggestionClusterer
@@ -449,7 +449,6 @@ async def _run_post_game_pipeline(state: dict, result: str,
         cfg = load_config()
         if not cfg.enabled:
             return
-        ensure_directories(cfg)
 
         # 1. Format trace
         game_trace = format_game_trace(state.get("events", []), state.get("players", {}))
@@ -492,7 +491,7 @@ async def _run_post_game_pipeline(state: dict, result: str,
             buffer_status = pool.ingest(reflection)
 
             # 6. Trigger clustering
-            clusterer = SuggestionClusterer(cfg)
+            clusterer = SuggestionClusterer(cfg, pool)
             clusterer.process_pending()
 
             # 7. Check confirmation
@@ -557,25 +556,13 @@ async def _run_post_game_pipeline(state: dict, result: str,
         # 11. Expire old suggestions
         pool.expire_old_suggestions()
 
-        # 11.5 Record game end time for Curator idle tracking
-        from evolution.config import AGENT_HOME
-        curator_state_path = AGENT_HOME / "memory" / "curator_state.json"
-        curator_state = {}
-        if curator_state_path.exists():
-            try:
-                with open(curator_state_path) as f:
-                    curator_state = json.load(f)
-            except Exception:
-                pass
+        # 11.5 Record game end time for Curator idle tracking (MySQL)
+        from evolution.curator import Curator
         from datetime import datetime, timezone
-        curator_state["last_game_end_at"] = datetime.now(timezone.utc).isoformat()
-        curator_state_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(curator_state_path, "w") as f:
-            json.dump(curator_state, f)
+        curator = Curator(cfg)
+        curator._save_state({"last_game_end_at": datetime.now(timezone.utc).isoformat()})
 
         # 12. Check if Curator should run
-        from evolution.curator import Curator
-        curator = Curator(cfg)
         if curator.should_run(is_game_in_progress=False):
             try:
                 summary = curator.run()
@@ -714,6 +701,23 @@ def _create_http_app():
     app.router.add_post("/agent/perceive", _http_agent_perceive)
     app.router.add_post("/agent/act", _http_agent_act)
     app.router.add_post("/agent/game_over", _http_agent_game_over)
+
+    # Evolution dashboard API
+    app.router.add_get("/evolution/overview", _evo_overview)
+    app.router.add_get("/evolution/skills", _evo_skills)
+    app.router.add_get("/evolution/skills/{skill_name}", _evo_skill_detail)
+    app.router.add_post("/evolution/skills/{skill_name}/rollback", _evo_rollback)
+    app.router.add_post("/evolution/skills/{skill_name}/pin", _evo_pin)
+    app.router.add_get("/evolution/buffer", _evo_buffer)
+    app.router.add_get("/evolution/buffer/clusters/{cluster_id}", _evo_cluster_detail)
+    app.router.add_post("/evolution/buffer/clusters/{cluster_id}/force-confirm", _evo_force_confirm)
+    app.router.add_get("/evolution/skills/{skill_name}/versions/{version}/content", _evo_version_content)
+    app.router.add_delete("/evolution/skills/{skill_name}/versions/{version}", _evo_delete_version)
+    app.router.add_post("/evolution/skills/{skill_name}/versions", _evo_create_version)
+    app.router.add_get("/evolution/skills/{skill_name}/diff", _evo_diff)
+    app.router.add_get("/evolution/gaps", _evo_gaps)
+    app.router.add_get("/evolution/games", _evo_games)
+
     return app
 
 
@@ -765,13 +769,12 @@ async def _process_force_confirm(session_id: str, req_id: str,
         return {"type": "error", "req_id": req_id,
                 "detail": "cluster_id is required"}
     try:
-        from evolution.config import load_config, ensure_directories
+        from evolution.config import load_config
         from evolution.buffer_pool import BufferPool
         from evolution.confirmation import ConfirmationJudge
         from evolution.version_manager import VersionManager
 
         cfg = load_config()
-        ensure_directories(cfg)
 
         pool = BufferPool(cfg)
         cluster = pool.load_cluster(cluster_id)
@@ -807,6 +810,255 @@ async def _process_force_confirm(session_id: str, req_id: str,
         }
     except Exception as e:
         return {"type": "error", "req_id": req_id, "detail": str(e)}
+
+
+# ── Evolution Dashboard HTTP API ─────────────────────────────
+
+async def _evo_overview(request):
+    try:
+        from evolution.config import load_config
+        from evolution.buffer_pool import BufferPool
+        from evolution.db import get_session
+        from evolution.models import EvolutionSkill, EvolutionRuntimeState
+        from sqlalchemy import func
+
+        cfg = load_config()
+        pool = BufferPool(cfg)
+        status = pool.get_status()
+
+        session = get_session()
+        try:
+            skill_count = session.query(func.count(EvolutionSkill.id)).scalar() or 0
+            curator_record = session.get(EvolutionRuntimeState, "curator")
+            curator_last_run = (curator_record.payload_json or {}).get("last_run_at") if curator_record else None
+        finally:
+            session.close()
+
+        return aiohttp_web.json_response({
+            "pending_count": status["pending_count"],
+            "cluster_count": status["cluster_count"],
+            "confirmed_count": status["confirmed_count"],
+            "expired_count": status["expired_count"],
+            "skill_count": skill_count,
+            "curator_last_run": curator_last_run,
+        })
+    except Exception as e:
+        return aiohttp_web.json_response({"detail": str(e)}, status=500)
+
+
+async def _evo_skills(request):
+    try:
+        from evolution.config import load_config
+        from evolution.skill_loader import SkillLoader
+        cfg = load_config()
+        loader = SkillLoader(cfg)
+        return aiohttp_web.json_response(loader.list_skills())
+    except Exception as e:
+        return aiohttp_web.json_response({"detail": str(e)}, status=500)
+
+
+async def _evo_skill_detail(request):
+    try:
+        from evolution.config import load_config
+        from evolution.skill_loader import SkillLoader
+        cfg = load_config()
+        loader = SkillLoader(cfg)
+        skill_name = request.match_info["skill_name"]
+        detail = loader.get_skill_detail(skill_name)
+        if not detail:
+            return aiohttp_web.json_response({"detail": "Skill not found"}, status=404)
+        return aiohttp_web.json_response(detail)
+    except Exception as e:
+        return aiohttp_web.json_response({"detail": str(e)}, status=500)
+
+
+async def _evo_rollback(request):
+    try:
+        from evolution.config import load_config
+        from evolution.version_manager import VersionManager
+        cfg = load_config()
+        vm = VersionManager(cfg)
+        skill_name = request.match_info["skill_name"]
+        target_version = request.query.get("target_version", "")
+        success = vm.rollback(skill_name, target_version)
+        if not success:
+            return aiohttp_web.json_response({"detail": "Rollback failed"}, status=400)
+        return aiohttp_web.json_response({"success": True, "skill_name": skill_name, "current_default": target_version})
+    except Exception as e:
+        return aiohttp_web.json_response({"detail": str(e)}, status=500)
+
+
+async def _evo_pin(request):
+    try:
+        from evolution.config import load_config
+        from evolution.version_manager import VersionManager
+        cfg = load_config()
+        vm = VersionManager(cfg)
+        skill_name = request.match_info["skill_name"]
+        version = request.query.get("version", "")
+        pinned = request.query.get("pinned", "true").lower() == "true"
+        success = vm.pin_version(skill_name, version, pinned)
+        if not success:
+            return aiohttp_web.json_response({"detail": "Pin failed"}, status=400)
+        return aiohttp_web.json_response({"success": True, "skill_name": skill_name, "version": version, "pinned": pinned})
+    except Exception as e:
+        return aiohttp_web.json_response({"detail": str(e)}, status=500)
+
+
+async def _evo_buffer(request):
+    try:
+        from evolution.config import load_config
+        from evolution.buffer_pool import BufferPool
+        cfg = load_config()
+        pool = BufferPool(cfg)
+        return aiohttp_web.json_response(pool.get_status())
+    except Exception as e:
+        return aiohttp_web.json_response({"detail": str(e)}, status=500)
+
+
+async def _evo_cluster_detail(request):
+    try:
+        from evolution.config import load_config
+        from evolution.buffer_pool import BufferPool
+        cfg = load_config()
+        pool = BufferPool(cfg)
+        cluster_id = request.match_info["cluster_id"]
+        detail = pool.load_cluster(cluster_id)
+        if not detail:
+            return aiohttp_web.json_response({"detail": "Cluster not found"}, status=404)
+        return aiohttp_web.json_response(detail)
+    except Exception as e:
+        return aiohttp_web.json_response({"detail": str(e)}, status=500)
+
+
+async def _evo_force_confirm(request):
+    try:
+        from evolution.config import load_config
+        from evolution.buffer_pool import BufferPool
+        from evolution.confirmation import ConfirmationJudge
+        from evolution.version_manager import VersionManager
+        cfg = load_config()
+        pool = BufferPool(cfg)
+        cluster_id = request.match_info["cluster_id"]
+        cluster = pool.load_cluster(cluster_id)
+        if not cluster:
+            return aiohttp_web.json_response({"detail": "Cluster not found"}, status=404)
+        target_skill = cluster.get("target_skill", "")
+        suggestions = cluster.get("suggestions", [])
+        if not target_skill or not suggestions:
+            return aiohttp_web.json_response({"detail": "Cluster has no target_skill or suggestions"}, status=400)
+        vm = VersionManager(cfg)
+        judge = ConfirmationJudge(cfg, pool, vm)
+        new_content = judge._synthesize_strategy(suggestions, target_skill)
+        version_name = vm.create_new_version(target_skill, new_content, "manual_force_confirm", cluster_id)
+        pool.move_to_confirmed(cluster_id)
+        return aiohttp_web.json_response({"success": True, "cluster_id": cluster_id, "skill_name": target_skill, "new_version": version_name})
+    except Exception as e:
+        return aiohttp_web.json_response({"detail": str(e)}, status=500)
+
+
+async def _evo_version_content(request):
+    try:
+        from evolution.config import load_config
+        from evolution.skill_loader import SkillLoader
+        cfg = load_config()
+        loader = SkillLoader(cfg)
+        skill_name = request.match_info["skill_name"]
+        version = request.match_info["version"]
+        content = loader.get_version_content(skill_name, version)
+        if content is None:
+            return aiohttp_web.json_response({"detail": "Not found"}, status=404)
+        return aiohttp_web.json_response({"skill_name": skill_name, "version": version, "content": content})
+    except Exception as e:
+        return aiohttp_web.json_response({"detail": str(e)}, status=500)
+
+
+async def _evo_delete_version(request):
+    try:
+        from evolution.config import load_config
+        from evolution.version_manager import VersionManager
+        cfg = load_config()
+        vm = VersionManager(cfg)
+        skill_name = request.match_info["skill_name"]
+        version = request.match_info["version"]
+        success = vm.delete_version(skill_name, version)
+        if not success:
+            return aiohttp_web.json_response({"detail": "Delete failed"}, status=400)
+        return aiohttp_web.json_response({"success": True, "skill_name": skill_name, "deleted_version": version})
+    except Exception as e:
+        return aiohttp_web.json_response({"detail": str(e)}, status=500)
+
+
+async def _evo_create_version(request):
+    try:
+        from evolution.config import load_config
+        from evolution.version_manager import VersionManager
+        cfg = load_config()
+        vm = VersionManager(cfg)
+        skill_name = request.match_info["skill_name"]
+        body = await request.json()
+        content = body.get("content", "")
+        version_name = vm.create_new_version(skill_name, content)
+        return aiohttp_web.json_response({"success": True, "skill_name": skill_name, "new_version": version_name})
+    except Exception as e:
+        return aiohttp_web.json_response({"detail": str(e)}, status=500)
+
+
+async def _evo_diff(request):
+    try:
+        from evolution.config import load_config
+        from evolution.skill_loader import SkillLoader
+        cfg = load_config()
+        loader = SkillLoader(cfg)
+        skill_name = request.match_info["skill_name"]
+        version_a = request.query.get("version_a", "")
+        version_b = request.query.get("version_b", "")
+        result = loader.diff_versions(skill_name, version_a, version_b)
+        if not result:
+            return aiohttp_web.json_response({"detail": "Not found"}, status=404)
+        return aiohttp_web.json_response(result)
+    except Exception as e:
+        return aiohttp_web.json_response({"detail": str(e)}, status=500)
+
+
+async def _evo_gaps(request):
+    try:
+        from memory.game_archive import get_frequent_gaps
+        min_count = int(request.query.get("min_count", "3"))
+        return aiohttp_web.json_response(get_frequent_gaps(min_count))
+    except Exception as e:
+        return aiohttp_web.json_response({"detail": str(e)}, status=500)
+
+
+async def _evo_games(request):
+    try:
+        from evolution.db import get_session
+        from evolution.models import EvolutionGameArchive
+        from sqlalchemy import desc
+        limit = int(request.query.get("limit", "20"))
+        session = get_session()
+        try:
+            rows = session.query(EvolutionGameArchive).order_by(
+                desc(EvolutionGameArchive.created_at)
+            ).limit(limit).all()
+            result = []
+            for row in rows:
+                payload = row.payload_json or {}
+                result.append({
+                    "game_id": row.game_id,
+                    "winner": payload.get("winner"),
+                    "round_count": payload.get("round_count", row.day_count),
+                    "players_count": payload.get("players_count", len(payload.get("players") or [])),
+                    "duration_seconds": payload.get("duration_seconds", 0),
+                    "created_at": row.created_at.isoformat() if row.created_at else None,
+                    "players": payload.get("players") or [],
+                    "has_builtin_ai": row.has_builtin_ai,
+                })
+            return aiohttp_web.json_response(result)
+        finally:
+            session.close()
+    except Exception as e:
+        return aiohttp_web.json_response({"detail": str(e)}, status=500)
 
 
 async def _cleanup_loop(interval: float):

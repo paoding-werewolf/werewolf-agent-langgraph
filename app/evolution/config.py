@@ -5,8 +5,6 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
 
-AGENT_HOME = Path(os.getenv("WEREWOLF_AGENT_HOME", "~/.werewolf-agent")).expanduser()
-
 
 @dataclass
 class ReflectionConfig:
@@ -16,7 +14,6 @@ class ReflectionConfig:
 
 @dataclass
 class BufferConfig:
-    path: str = str(AGENT_HOME / "policy_buffer")
     max_age_days: int = 30
     max_cluster_size: int = 20
     cleanup_interval_hours: int = 24
@@ -63,12 +60,11 @@ class EvolutionConfig:
     reflection_model: str = ""
     in_game_flag_causal_multiplier: float = 1.3
     medium_match_causal_discount: float = 0.7
-    skills_path: str = str(AGENT_HOME / "skills")
 
 
 def load_config() -> EvolutionConfig:
     """从 YAML 文件加载配置，不存在则返回默认值。"""
-    config_path = AGENT_HOME / "config.yaml"
+    config_path = Path(os.getenv("WEREWOLF_AGENT_HOME", "~/.werewolf-agent")).expanduser() / "config.yaml"
     if config_path.exists():
         with open(config_path) as f:
             raw = yaml.safe_load(f) or {}
@@ -87,8 +83,7 @@ def load_config() -> EvolutionConfig:
         _merge_dataclass(cfg.curator, dp.get("curator", {}))
 
         for k in ("enabled", "clustering_model", "reflection_model",
-                  "in_game_flag_causal_multiplier", "medium_match_causal_discount",
-                  "skills_path"):
+                  "in_game_flag_causal_multiplier", "medium_match_causal_discount"):
             if k in dp:
                 setattr(cfg, k, dp[k])
         return cfg
@@ -96,30 +91,7 @@ def load_config() -> EvolutionConfig:
 
 
 def _merge_dataclass(obj, overrides: dict, prefix: str = ""):
-    """将 dict 中的键值对覆盖到 dataclass 实例上。
-
-    prefix 不为空时，会将 overrides 中的 key 加上 prefix 前缀后
-    再在 obj 上查找属性。用于 ConfirmationConfig 这种把 normal/fast_track
-    分组的场景。
-    """
     for k, v in overrides.items():
         target_key = f"{prefix}{k}" if prefix else k
         if hasattr(obj, target_key):
             setattr(obj, target_key, v)
-
-
-def ensure_directories(cfg: EvolutionConfig):
-    """启动时调用，创建所有必要目录。"""
-    dirs = [
-        Path(cfg.buffer.path) / "pending",
-        Path(cfg.buffer.path) / "clusters",
-        Path(cfg.buffer.path) / "confirmed",
-        Path(cfg.buffer.path) / "expired",
-        Path(cfg.skills_path),
-        AGENT_HOME / "memory" / "opponents",
-        AGENT_HOME / "memory" / "self_model",
-        AGENT_HOME / "memory" / "game_archive",
-        AGENT_HOME / "skills" / ".curator_backups",
-    ]
-    for d in dirs:
-        d.mkdir(parents=True, exist_ok=True)
