@@ -50,7 +50,7 @@ class CuratorConfig:
 
 @dataclass
 class GEPAConfig:
-    enabled: bool = False
+    enabled: bool = True
     min_games_for_fitness: int = 20
     min_skills_in_library: int = 5
     num_generations: int = 10

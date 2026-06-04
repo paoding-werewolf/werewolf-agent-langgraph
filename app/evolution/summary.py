@@ -25,6 +25,9 @@ from agents.llm_caller import LLMCaller
 class EvolutionSummary:
     """自进化系统活动摘要生成器。"""
 
+    def __init__(self, cfg: Optional[EvolutionConfig] = None):
+        self.cfg = cfg
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
