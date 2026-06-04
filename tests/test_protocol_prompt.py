@@ -40,6 +40,9 @@ def test_normalize_wire_status_for_event_and_action():
     assert normalize_status("sheriff", mode="event") == "sheriff_election_result"
     assert normalize_status("sheriff", mode="action") == "sheriff_transfer"
     assert normalize_status("death_notice") == "death_settlement"
+    assert normalize_status("wolf_chat") == "wolf_chat"
+    assert normalize_status("hunter", mode="event") == "shoot_begin"
+    assert normalize_status("hunter", mode="action") == "shoot_skill"
     assert normalize_action_status("skill", message="请选择查验目标") == "seer_check"
     assert normalize_action_status("skill", previous_phase="guard_action") == "guard_action"
     assert normalize_event_status(
@@ -51,6 +54,12 @@ def test_normalize_wire_status_for_event_and_action():
         [],
         message="预言家查验了 2号，结果为：好人",
     ) == "seer_check"
+    assert normalize_event_status(
+        "hunter",
+        [{"from": "3", "to": "4", "action": "shoot_skill"}],
+        message="3号 开枪带走了 4号",
+    ) == "shoot_skill"
+    assert normalize_event_status("hunter", [], message="3号 死亡，请发动技能") == "shoot_begin"
 
 
 def test_route_uses_current_action_status_not_previous_phase():
@@ -74,6 +83,27 @@ def test_route_handles_sheriff_speech_and_order_separately():
 
     assert _route_by_phase(speech_state) == "decide_discussion"
     assert _route_by_phase(order_state) == "decide_generic"
+
+
+def test_route_handles_synced_server_phases():
+    wolf_state = _state(
+        phase="night_begin",
+        request={"status": "wolf_chat", "message": "请与狼队友私聊沟通", "round": 1},
+    )
+    wolf_state["my_role"] = "wolf"
+    election_state = _state(
+        phase="sheriff_election_speech",
+        request={"status": "sheriff_election_vote_begin", "message": "现在开始警长投票", "round": 1},
+    )
+    shoot_state = _state(
+        phase="dawn_report",
+        request={"status": "hunter", "message": "请发动技能", "round": 1},
+    )
+    shoot_state["my_role"] = "hunter"
+
+    assert _route_by_phase(wolf_state) == "decide_wolf_gesture"
+    assert _route_by_phase(election_state) == "decide_election"
+    assert _route_by_phase(shoot_state) == "decide_shoot"
 
 
 def test_choose_speech_order_tool_returns_direction_for_server():
