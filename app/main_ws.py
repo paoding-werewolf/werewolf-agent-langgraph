@@ -744,6 +744,7 @@ def _create_http_app():
     app.router.add_get("/evolution/skills/{skill_name}/diff", _evo_diff)
     app.router.add_get("/evolution/gaps", _evo_gaps)
     app.router.add_get("/evolution/games", _evo_games)
+    app.router.add_get("/evolution/curator/status", _evo_curator_status)
 
     return app
 
@@ -1086,6 +1087,71 @@ async def _evo_games(request):
             return aiohttp_web.json_response(result)
         finally:
             session.close()
+    except Exception as e:
+        return aiohttp_web.json_response({"detail": str(e)}, status=500)
+
+
+async def _evo_curator_status(request):
+    try:
+        from evolution.config import load_config
+        from evolution.db import get_session
+        from evolution.models import EvolutionRuntimeState
+        from datetime import datetime, timezone, timedelta
+
+        cfg = load_config()
+
+        session = get_session()
+        try:
+            record = session.get(EvolutionRuntimeState, "curator")
+            payload = dict(record.payload_json) if record else {}
+        finally:
+            session.close()
+
+        last_run_at = payload.get("last_run_at")
+        last_game_end_at = payload.get("last_game_end_at")
+
+        next_run_at = None
+        if last_run_at:
+            try:
+                last_run_dt = datetime.fromisoformat(last_run_at)
+                interval_delta = timedelta(hours=cfg.curator.interval_hours)
+                candidate = last_run_dt + interval_delta
+                if last_game_end_at:
+                    last_game_dt = datetime.fromisoformat(last_game_end_at)
+                    idle_delta = timedelta(hours=cfg.curator.min_idle_hours)
+                    idle_candidate = last_game_dt + idle_delta
+                    candidate = max(candidate, idle_candidate)
+                next_run_at = candidate.isoformat()
+            except (ValueError, TypeError):
+                pass
+
+        return aiohttp_web.json_response({
+            "enabled": cfg.curator.enabled,
+            "interval_hours": cfg.curator.interval_hours,
+            "min_idle_hours": cfg.curator.min_idle_hours,
+            "max_iterations": cfg.curator.max_iterations,
+            "versioning": {
+                "demotion_stale_days": cfg.versioning.demotion_stale_days,
+                "demotion_archive_days": cfg.versioning.demotion_archive_days,
+                "promotion_min_games": cfg.versioning.promotion_min_games,
+                "promotion_min_win_rate_delta": cfg.versioning.promotion_min_win_rate_delta,
+                "warmup_games": cfg.versioning.warmup_games,
+                "max_versions_per_skill": cfg.versioning.max_versions_per_skill,
+            },
+            "clustering_model": cfg.clustering_model,
+            "confirmation": {
+                "normal_min_count": cfg.confirmation.normal_min_count,
+                "normal_min_consistency_rate": cfg.confirmation.normal_min_consistency_rate,
+                "normal_min_avg_causal_strength": cfg.confirmation.normal_min_avg_causal_strength,
+                "fast_track_min_causal_strength": cfg.confirmation.fast_track_min_causal_strength,
+                "fast_track_min_count": cfg.confirmation.fast_track_min_count,
+            },
+            "runtime": {
+                "last_run_at": last_run_at,
+                "last_game_end_at": last_game_end_at,
+                "next_run_at": next_run_at,
+            },
+        })
     except Exception as e:
         return aiohttp_web.json_response({"detail": str(e)}, status=500)
 
