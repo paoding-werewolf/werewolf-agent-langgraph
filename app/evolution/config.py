@@ -49,6 +49,23 @@ class CuratorConfig:
 
 
 @dataclass
+class GEPAConfig:
+    enabled: bool = False
+    min_games_for_fitness: int = 20
+    min_skills_in_library: int = 5
+    num_generations: int = 10
+    population_size: int = 8
+    mutation_model: str = "deepseek-chat"
+    judge_model: str = "deepseek-chat"
+    game_service_url: str = "http://host.docker.internal:8081"
+
+
+@dataclass
+class SummaryConfig:
+    model: str = "deepseek-chat"
+
+
+@dataclass
 class EvolutionConfig:
     enabled: bool = True
     reflection: ReflectionConfig = field(default_factory=ReflectionConfig)
@@ -56,6 +73,8 @@ class EvolutionConfig:
     confirmation: ConfirmationConfig = field(default_factory=ConfirmationConfig)
     versioning: VersioningConfig = field(default_factory=VersioningConfig)
     curator: CuratorConfig = field(default_factory=CuratorConfig)
+    gepa: GEPAConfig = field(default_factory=GEPAConfig)
+    summary: SummaryConfig = field(default_factory=SummaryConfig)
     clustering_model: str = "deepseek-chat"
     reflection_model: str = ""
     in_game_flag_causal_multiplier: float = 1.3
@@ -81,6 +100,8 @@ def load_config() -> EvolutionConfig:
 
         _merge_dataclass(cfg.versioning, dp.get("versioning", {}))
         _merge_dataclass(cfg.curator, dp.get("curator", {}))
+        _merge_dataclass(cfg.gepa, dp.get("gepa", {}))
+        _merge_dataclass(cfg.summary, dp.get("summary", {}))
 
         for k in ("enabled", "clustering_model", "reflection_model",
                   "in_game_flag_causal_multiplier", "medium_match_causal_discount"):
