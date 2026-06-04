@@ -72,7 +72,22 @@ class BufferPool:
                 EvolutionBufferItem.item_key == cluster_id,
                 EvolutionBufferItem.item_type.in_(["cluster", "confirmed"]),
             ).first()
-            return item.payload_json if item else None
+            if not item:
+                return None
+            result = {
+                "cluster_id": item.item_key,
+                "suggestion_count": item.suggestion_count,
+                "target_skill": item.target_skill_name or "",
+                "avg_causal_strength": float(item.avg_causal_strength or 0),
+                "consistency_rate": float(item.consistency_rate or 0),
+                "scene_tags": item.scene_tags_json or {},
+                "preview_texts": item.preview_texts_json or [],
+                "created_at": item.created_at.isoformat() if item.created_at else None,
+                "updated_at": item.updated_at.isoformat() if item.updated_at else None,
+            }
+            if item.payload_json and "suggestions" in item.payload_json:
+                result["suggestions"] = item.payload_json["suggestions"]
+            return result
         finally:
             session.close()
 
