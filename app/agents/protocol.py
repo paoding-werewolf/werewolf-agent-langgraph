@@ -10,6 +10,7 @@ EVENT_STATUS_MAP = {
     "night": "night_begin",
     "night_info": "dawn_report",
     "death_notice": "death_settlement",
+    "wolf_chat": "wolf_chat",
     "discuss": "discussion",
     "sheriff_election": "sheriff_election_signup",
     "sheriff_speech": "sheriff_election_speech",
@@ -17,12 +18,13 @@ EVENT_STATUS_MAP = {
     "sheriff_speech_order": "sheriff_choose",
     "sheriff_pk": "sheriff_pk_speech",
     "sheriff": "sheriff_election_result",
-    "hunter": "shoot_skill",
+    "hunter": "shoot_begin",
     "result": "game_over",
 }
 
 ACTION_STATUS_MAP = {
     **EVENT_STATUS_MAP,
+    "hunter": "shoot_skill",
     "sheriff": "sheriff_transfer",
 }
 
@@ -68,8 +70,14 @@ def normalize_action_status(status: Any, *, message: Any = "", previous_phase: A
 
 def normalize_event_status(status: Any, traces: Iterable[dict] | None = None, *, message: Any = "") -> str:
     value = str(status or "")
+    actions = {trace.get("action") for trace in (traces or [])}
+    text = str(message or "").lower()
+    if value == "hunter":
+        if actions & {"shoot_skill"} or "开枪" in text or "放弃" in text:
+            return "shoot_skill"
+        return "shoot_begin"
+
     if value == "skill_result":
-        actions = {trace.get("action") for trace in (traces or [])}
         if actions & {"guard_protect"}:
             return "guard_action"
         if actions & {"wolf_kill"}:
@@ -81,7 +89,6 @@ def normalize_event_status(status: Any, traces: Iterable[dict] | None = None, *,
         if actions & {"shoot_skill"}:
             return "shoot_skill"
 
-        text = str(message or "").lower()
         for phase, tokens in SKILL_MESSAGE_MAP:
             if any(token in text for token in tokens):
                 return phase

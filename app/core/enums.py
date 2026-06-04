@@ -34,8 +34,6 @@ class GamePhase:
     GUARD_ACTION = "guard_action"
     WOLF_CHAT_BEGIN = "wolf_chat_begin"
     WOLF_CHAT = "wolf_chat"
-    WOLF_GESTURE_BEGIN = "wolf_gesture_begin"
-    WOLF_GESTURE = "wolf_gesture"
     WOLF_KILL_BEGIN = "wolf_kill_begin"
     WOLF_KILL = "wolf_kill"
     WOLF_KILL_RESULT = "wolf_kill_result"
@@ -54,6 +52,7 @@ class GamePhase:
     ELECTION_BEGIN = "election_begin"
     SHERIFF_ELECTION_SIGNUP = "sheriff_election_signup"
     SHERIFF_ELECTION_SPEECH = "sheriff_election_speech"
+    SHERIFF_ELECTION_VOTE_BEGIN = "sheriff_election_vote_begin"
     SHERIFF_ELECTION_VOTE = "sheriff_election_vote"
     SHERIFF_ELECTION_RESULT = "sheriff_election_result"
     SHERIFF_PK_SPEECH = "sheriff_pk_speech"
@@ -76,21 +75,24 @@ class GamePhase:
     # === 终局 ===
     GAME_OVER = "game_over"
 
+    # 状态机阶段列表（不含仅作为事件类型的子阶段）
     ALL_PHASES = [
         INIT, START_GAME,
         NIGHT_BEGIN,
         GUARD_ACTION_BEGIN, GUARD_ACTION,
         WOLF_CHAT_BEGIN, WOLF_CHAT,
-        WOLF_GESTURE_BEGIN, WOLF_GESTURE,
-        WOLF_KILL_BEGIN, WOLF_KILL, WOLF_KILL_RESULT,
+        WOLF_KILL_BEGIN, WOLF_KILL,
         SEER_CHECK_BEGIN, SEER_CHECK,
         WITCH_ACTION_BEGIN, WITCH_ACTION,
-        DEATH_SETTLEMENT, HUNTER_REMINDER_BEGIN, WOLF_KING_REMINDER_BEGIN,
-        SHOOT_BEGIN, SHOOT_REMINDER, DAWN_REPORT,
+        DEATH_SETTLEMENT,
+        SHOOT_REMINDER, DAWN_REPORT,
         ELECTION_BEGIN, SHERIFF_ELECTION_SIGNUP, SHERIFF_ELECTION_SPEECH,
-        SHERIFF_ELECTION_VOTE, SHERIFF_ELECTION_RESULT, SHERIFF_PK_SPEECH, SHERIFF_PK_VOTE, SHERIFF_PK_VOTE_RESULT,
-        CHECK_GAME_END, DISCUSS_BEGIN,
-        SHERIFF_CHOOSE, DISCUSSION, VOTE, VOTE_RESULT,
+        SHERIFF_ELECTION_VOTE_BEGIN,
+        SHERIFF_ELECTION_VOTE, SHERIFF_ELECTION_RESULT,
+        SHERIFF_PK_SPEECH, SHERIFF_PK_VOTE,
+        DISCUSS_BEGIN,
+        SHERIFF_CHOOSE, DISCUSSION, VOTE,
+        SHOOT_BEGIN,
         SHOOT_SKILL,
         SHERIFF_TRANSFER, LAST_WORDS,
         GAME_OVER,
@@ -102,13 +104,11 @@ class GamePhase:
 # applicable_roles: 哪些角色在该阶段有特殊的“睁眼”视角或行动权
 PHASE_CONFIG = {
     # 夜晚
-    GamePhase.NIGHT_BEGIN: {"is_global": True, "applicable_roles": [], "group": "night_begin"},
+    GamePhase.NIGHT_BEGIN: {"is_global": True, "applicable_roles": [], "group": "night"},
     GamePhase.GUARD_ACTION_BEGIN: {"is_global": True, "applicable_roles": [], "group": "guard_action"},
     GamePhase.GUARD_ACTION: {"is_global": False, "applicable_roles": [Role.GUARD], "group": "guard_action"},
-    GamePhase.WOLF_CHAT_BEGIN: {"is_global": True, "applicable_roles": [], "group": "wolf_kill"},
-    GamePhase.WOLF_CHAT: {"is_global": False, "applicable_roles": [Role.WOLF, Role.WOLF_KING], "group": "wolf_kill"},
-    GamePhase.WOLF_GESTURE_BEGIN: {"is_global": True, "applicable_roles": [], "group": "wolf_kill"},
-    GamePhase.WOLF_GESTURE: {"is_global": False, "applicable_roles": [Role.WOLF, Role.WOLF_KING], "group": "wolf_kill"},
+    GamePhase.WOLF_CHAT_BEGIN: {"is_global": True, "applicable_roles": [], "group": "wolf_chat"},
+    GamePhase.WOLF_CHAT: {"is_global": False, "applicable_roles": [Role.WOLF, Role.WOLF_KING], "group": "wolf_chat"},
     GamePhase.WOLF_KILL_BEGIN: {"is_global": True, "applicable_roles": [], "group": "wolf_kill"},
     GamePhase.WOLF_KILL: {"is_global": False, "applicable_roles": [Role.WOLF, Role.WOLF_KING], "group": "wolf_kill"},
     GamePhase.WOLF_KILL_RESULT: {"is_global": False, "applicable_roles": [Role.WOLF, Role.WOLF_KING], "group": "wolf_kill"},
@@ -119,19 +119,20 @@ PHASE_CONFIG = {
     GamePhase.DEATH_SETTLEMENT: {"is_global": False, "applicable_roles": [], "group": "dawn_report"},
     GamePhase.HUNTER_REMINDER_BEGIN: {"is_global": True, "applicable_roles": [], "group": "dawn_report"},
     GamePhase.WOLF_KING_REMINDER_BEGIN: {"is_global": True, "applicable_roles": [], "group": "dawn_report"},
-    GamePhase.SHOOT_BEGIN: {"is_global": True, "applicable_roles": [], "group": "dawn_report"},
+    GamePhase.SHOOT_BEGIN: {"is_global": True, "applicable_roles": [], "group": "shoot_skill"},
     GamePhase.SHOOT_REMINDER: {"is_global": False, "applicable_roles": [Role.HUNTER, Role.WOLF_KING], "group": "dawn_report"},
     GamePhase.DAWN_REPORT: {"is_global": True, "applicable_roles": [], "group": "dawn_report"},
 
     # 竞选
-    GamePhase.ELECTION_BEGIN: {"is_global": True, "applicable_roles": [], "group": "election"},
-    GamePhase.SHERIFF_ELECTION_SIGNUP: {"is_global": True, "applicable_roles": [], "group": "election"},
-    GamePhase.SHERIFF_ELECTION_SPEECH: {"is_global": True, "applicable_roles": [], "group": "election"},
-    GamePhase.SHERIFF_ELECTION_VOTE: {"is_global": True, "applicable_roles": [], "group": "election"},
-    GamePhase.SHERIFF_ELECTION_RESULT: {"is_global": True, "applicable_roles": [], "group": "election"},
-    GamePhase.SHERIFF_PK_SPEECH: {"is_global": True, "applicable_roles": [], "group": "election"},
-    GamePhase.SHERIFF_PK_VOTE: {"is_global": True, "applicable_roles": [], "group": "election"},
-    GamePhase.SHERIFF_PK_VOTE_RESULT: {"is_global": True, "applicable_roles": [], "group": "election"},
+    GamePhase.ELECTION_BEGIN: {"is_global": True, "applicable_roles": [], "group": "sheriff_election"},
+    GamePhase.SHERIFF_ELECTION_SIGNUP: {"is_global": True, "applicable_roles": [], "group": "sheriff_election"},
+    GamePhase.SHERIFF_ELECTION_SPEECH: {"is_global": True, "applicable_roles": [], "group": "sheriff_election"},
+    GamePhase.SHERIFF_ELECTION_VOTE_BEGIN: {"is_global": True, "applicable_roles": [], "group": "sheriff_election"},
+    GamePhase.SHERIFF_ELECTION_VOTE: {"is_global": True, "applicable_roles": [], "group": "sheriff_election"},
+    GamePhase.SHERIFF_ELECTION_RESULT: {"is_global": True, "applicable_roles": [], "group": "sheriff_election"},
+    GamePhase.SHERIFF_PK_SPEECH: {"is_global": True, "applicable_roles": [], "group": "sheriff_election"},
+    GamePhase.SHERIFF_PK_VOTE: {"is_global": True, "applicable_roles": [], "group": "sheriff_election"},
+    GamePhase.SHERIFF_PK_VOTE_RESULT: {"is_global": True, "applicable_roles": [], "group": "sheriff_election"},
 
     # 白天
     GamePhase.DISCUSS_BEGIN: {"is_global": True, "applicable_roles": [], "group": "discussion"},
@@ -142,7 +143,7 @@ PHASE_CONFIG = {
     
     # 出局
     GamePhase.SHOOT_SKILL: {"is_global": True, "applicable_roles": [Role.HUNTER, Role.WOLF_KING], "group": "shoot_skill"},
-    GamePhase.SHERIFF_TRANSFER: {"is_global": True, "applicable_roles": [], "group": "last_words"},
+    GamePhase.SHERIFF_TRANSFER: {"is_global": True, "applicable_roles": [], "group": "sheriff_transfer"},
     GamePhase.LAST_WORDS: {"is_global": True, "applicable_roles": [], "group": "last_words"},
     
     GamePhase.GAME_OVER: {"is_global": True, "applicable_roles": [], "group": "game_over"},
@@ -150,14 +151,9 @@ PHASE_CONFIG = {
 
 
 
-class WolfGesture(str, Enum):
-    """狼人夜间手势"""
-    POINT = "point"           # 指认目标
-    LOWKEY = "lowkey"         # 保持低调
-    SHIFT = "shift"           # 转移焦点
-    CHANGE = "change"         # 改变策略
-    AGREE = "agree"           # 同意/确认
-    PASS = "pass"             # 弃权
+class WolfChat(str, Enum):
+    """狼人夜间私聊"""
+    MESSAGE = "message"
 
 
 class PlayerType(str, Enum):
@@ -165,6 +161,7 @@ class PlayerType(str, Enum):
     BUILTIN_AI = "builtin_ai"
     HUMAN = "human"
     HTTP_AGENT = "http_agent"
+    WS_AGENT = "ws_agent"
     RANDOM = "random"
 
 
@@ -181,7 +178,7 @@ class TraceAction(str, Enum):
     
     # 技能
     GUARD_PROTECT = "guard_protect"
-    WOLF_GESTURE = "wolf_gesture"
+    WOLF_CHAT = "wolf_chat"
     WOLF_KILL = "wolf_kill"
     SEER_WOLF = "seer_wolf"
     SEER_GOOD = "seer_good"

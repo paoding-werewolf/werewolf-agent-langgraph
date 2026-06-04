@@ -13,9 +13,11 @@ PRIVATE_NIGHT_ACTIONS = {
     "witch_action": Role.WITCH,
 }
 WOLF_TEAM_PHASES = {"wolf_kill"}
+WOLF_CHAT_PHASES = {"wolf_chat"}
 DISCUSSION_PHASES = {"discussion", "sheriff_election_speech", "sheriff_pk_speech"}
 ELECTION_PHASES = {
     "sheriff_election_signup",
+    "sheriff_election_vote_begin",
     "sheriff_election_vote",
     "sheriff_election_result",
 }
@@ -147,6 +149,8 @@ def _route_by_phase(state: AgentState) -> Literal[
 
     if PRIVATE_NIGHT_ACTIONS.get(phase) == my_role:
         return "decide_night_role"
+    if phase in WOLF_CHAT_PHASES and my_role.is_wolf_team:
+        return "decide_wolf_gesture"
     if phase in WOLF_TEAM_PHASES and my_role.is_wolf_team:
         return "decide_wolf_gesture"
     if phase in DISCUSSION_PHASES:

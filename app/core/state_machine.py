@@ -11,8 +11,8 @@ START_GAME = "start_game"
 NIGHT_BEGIN = "night_begin"
 GUARD_ACTION_BEGIN = "guard_action_begin"
 GUARD_ACTION = "guard_action"
-WOLF_GESTURE_BEGIN = "wolf_gesture_begin"
-WOLF_GESTURE = "wolf_gesture"
+WOLF_CHAT_BEGIN = "wolf_chat_begin"
+WOLF_CHAT = "wolf_chat"
 WOLF_KILL_BEGIN = "wolf_kill_begin"
 WOLF_KILL = "wolf_kill"
 SEER_CHECK_BEGIN = "seer_check_begin"
@@ -22,11 +22,13 @@ WITCH_ACTION = "witch_action"
 DEATH_SETTLEMENT = "death_settlement"
 SHOOT_REMINDER = "shoot_reminder"
 DAWN_REPORT = "dawn_report"
+SHOOT_BEGIN = "shoot_begin"
 
 # === 警长选举 (仅Day 1) ===
 ELECTION_BEGIN = "election_begin"
 SHERIFF_ELECTION_SIGNUP = "sheriff_election_signup"
 SHERIFF_ELECTION_SPEECH = "sheriff_election_speech"
+SHERIFF_ELECTION_VOTE_BEGIN = "sheriff_election_vote_begin"
 SHERIFF_ELECTION_VOTE = "sheriff_election_vote"
 SHERIFF_ELECTION_RESULT = "sheriff_election_result"
 SHERIFF_PK_SPEECH = "sheriff_pk_speech"
@@ -51,16 +53,19 @@ ALL_PHASES = [
     INIT, START_GAME,
     NIGHT_BEGIN, 
     GUARD_ACTION_BEGIN, GUARD_ACTION, 
-    WOLF_GESTURE_BEGIN, WOLF_GESTURE, 
+    WOLF_CHAT_BEGIN, WOLF_CHAT,
     WOLF_KILL_BEGIN, WOLF_KILL,
     SEER_CHECK_BEGIN, SEER_CHECK, 
     WITCH_ACTION_BEGIN, WITCH_ACTION, 
     DEATH_SETTLEMENT,
     SHOOT_REMINDER, DAWN_REPORT,
     ELECTION_BEGIN, SHERIFF_ELECTION_SIGNUP, SHERIFF_ELECTION_SPEECH,
-    SHERIFF_ELECTION_VOTE, SHERIFF_ELECTION_RESULT, SHERIFF_PK_SPEECH, SHERIFF_PK_VOTE,
-    CHECK_GAME_END, DISCUSS_BEGIN,
+    SHERIFF_ELECTION_VOTE_BEGIN,
+    SHERIFF_ELECTION_VOTE, SHERIFF_ELECTION_RESULT,
+    SHERIFF_PK_SPEECH, SHERIFF_PK_VOTE,
+    DISCUSS_BEGIN,
     SHERIFF_CHOOSE, DISCUSSION, VOTE,
+    SHOOT_BEGIN,
     SHOOT_SKILL,
     SHERIFF_TRANSFER, LAST_WORDS,
     GAME_OVER,
@@ -73,8 +78,16 @@ PHASE_SKIP_CONDITIONS: Dict[str, Callable[[GameState], bool]] = {
     SEER_CHECK: lambda s: not s.is_role_alive(Role.SEER),
     WITCH_ACTION: lambda s: not s.is_role_alive(Role.WITCH),
     SHERIFF_CHOOSE: lambda s: s.sheriff is None,
-    WOLF_GESTURE: lambda s: len(s.alive_wolves) <= 1,
+    WOLF_CHAT: lambda s: _alive_wolf_count(s) <= 1,
 }
+
+
+def _alive_wolf_count(state: GameState) -> int:
+    """兼容 AgentGameState 方法形式与服务端属性形式。"""
+    alive_wolves = state.alive_wolves
+    if callable(alive_wolves):
+        alive_wolves = alive_wolves()
+    return len(alive_wolves)
 
 
 def _resolve_skip(state: GameState, phase: str) -> str:
@@ -95,97 +108,62 @@ PHASE_TRANSITIONS: Dict[str, Callable[[GameState], str]] = {
     # START_GAME --> NIGHT_BEGIN
     START_GAME: lambda s: NIGHT_BEGIN,
 
-    # NIGHT_BEGIN --> GUARD_ACTION_BEGIN
+    # 夜晚阶段
     NIGHT_BEGIN: lambda s: GUARD_ACTION_BEGIN,
-
     GUARD_ACTION_BEGIN: lambda s: GUARD_ACTION,
-
-    # GUARD_ACTION --> WOLF_GESTURE_BEGIN
-    GUARD_ACTION: lambda s: WOLF_GESTURE_BEGIN,
-
-    WOLF_GESTURE_BEGIN: lambda s: WOLF_GESTURE,
-
-    # WOLF_GESTURE --> WOLF_KILL_BEGIN
-    WOLF_GESTURE: lambda s: WOLF_KILL_BEGIN,
-
+    GUARD_ACTION: lambda s: WOLF_CHAT_BEGIN,
+    WOLF_CHAT_BEGIN: lambda s: WOLF_CHAT,
+    WOLF_CHAT: lambda s: WOLF_KILL_BEGIN,
     WOLF_KILL_BEGIN: lambda s: WOLF_KILL,
-
-    # WOLF_KILL --> SEER_CHECK_BEGIN
     WOLF_KILL: lambda s: SEER_CHECK_BEGIN,
-
     SEER_CHECK_BEGIN: lambda s: SEER_CHECK,
-
-    # SEER_CHECK --> WITCH_ACTION_BEGIN
     SEER_CHECK: lambda s: WITCH_ACTION_BEGIN,
-
     WITCH_ACTION_BEGIN: lambda s: WITCH_ACTION,
 
-    # WITCH_ACTION --> (ELECTION_BEGIN if Day 1) | DEATH_SETTLEMENT (重点：竞选发生在结算前)
+    # WITCH_ACTION --> ELECTION_BEGIN (首日先竞选) | DEATH_SETTLEMENT
     WITCH_ACTION: lambda s: (
-        ELECTION_BEGIN if s.day == 1 and s.sheriff is None
+        ELECTION_BEGIN if s.round == 1 and s.sheriff is None
         else DEATH_SETTLEMENT
     ),
 
-    # ELECTION_BEGIN --> SHERIFF_ELECTION_SIGNUP
+    # 警长选举
     ELECTION_BEGIN: lambda s: SHERIFF_ELECTION_SIGNUP,
-
-    # SHERIFF_ELECTION_SIGNUP --> candidateCount
     SHERIFF_ELECTION_SIGNUP: lambda s: (
         SHERIFF_ELECTION_RESULT if len(s.sheriff_candidates) <= 1
         else SHERIFF_ELECTION_SPEECH
     ),
-
-    # SHERIFF_ELECTION_SPEECH --> SHERIFF_ELECTION_VOTE
-    SHERIFF_ELECTION_SPEECH: lambda s: SHERIFF_ELECTION_VOTE,
-
-    # SHERIFF_ELECTION_VOTE --> voteResult
+    SHERIFF_ELECTION_SPEECH: lambda s: SHERIFF_ELECTION_VOTE_BEGIN,
+    SHERIFF_ELECTION_VOTE_BEGIN: lambda s: SHERIFF_ELECTION_VOTE,
     SHERIFF_ELECTION_VOTE: lambda s: (
         _get_sheriff_voting_next(s)
     ),
-
-    # SHERIFF_PK_SPEECH --> SHERIFF_PK_VOTE
     SHERIFF_PK_SPEECH: lambda s: SHERIFF_PK_VOTE,
-
-    # SHERIFF_PK_VOTE --> SHERIFF_ELECTION_RESULT
     SHERIFF_PK_VOTE: lambda s: SHERIFF_ELECTION_RESULT,
-
-    # SHERIFF_ELECTION_RESULT --> DEATH_SETTLEMENT
     SHERIFF_ELECTION_RESULT: lambda s: DEATH_SETTLEMENT,
 
-    # DEATH_SETTLEMENT --> SHOOT_REMINDER
+    # 死亡结算
     DEATH_SETTLEMENT: lambda s: SHOOT_REMINDER,
-
-    # SHOOT_REMINDER --> DAWN_REPORT
     SHOOT_REMINDER: lambda s: DAWN_REPORT,
+    DAWN_REPORT: lambda s: SHOOT_BEGIN,
 
-    # DAWN_REPORT --> SHOOT_SKILL
-    DAWN_REPORT: lambda s: SHOOT_SKILL,
-
-    # DISCUSS_BEGIN --> SHERIFF_CHOOSE
+    # 白天
     DISCUSS_BEGIN: lambda s: SHERIFF_CHOOSE,
-
-    # SHERIFF_CHOOSE --> DISCUSSION
     SHERIFF_CHOOSE: lambda s: DISCUSSION,
-
-    # DISCUSSION --> VOTE
     DISCUSSION: lambda s: VOTE,
+    VOTE: lambda s: SHOOT_BEGIN,
 
-    # VOTE --> SHOOT_SKILL
-    VOTE: lambda s: SHOOT_SKILL,
-
-    # SHOOT_SKILL loops to itself if there are more pending shoots, else SHERIFF_TRANSFER
+    # 出局处理
+    SHOOT_BEGIN: lambda s: SHOOT_SKILL,
     SHOOT_SKILL: lambda s: (
         _get_shoot_skill_next(s)
     ),
-
-    # SHERIFF_TRANSFER --> LAST_WORDS
     SHERIFF_TRANSFER: lambda s: LAST_WORDS,
 
-    # LAST_WORDS --> router
+    # LAST_WORDS --> GAME_OVER | DISCUSS_BEGIN | NIGHT_BEGIN
     LAST_WORDS: lambda s: (
         GAME_OVER if s.check_game_end()
         else (
-            DISCUSS_BEGIN if getattr(s, '_transition_context', {}).get('last_words_source') == 'night'
+            DISCUSS_BEGIN if _last_words_source(s) == 'night'
             else NIGHT_BEGIN
         )
     ),
@@ -198,7 +176,9 @@ PHASE_TRANSITIONS: Dict[str, Callable[[GameState], str]] = {
 def _get_sheriff_voting_next(state: GameState) -> str:
     """SHERIFF_ELECTION_VOTE 后的条件转移"""
     ctx = getattr(state, '_transition_context', {})
-    vote_result = ctx.get('sheriff_vote_result', 'elected')
+    vote_result = getattr(state, 'sheriff_vote_result', None)
+    if vote_result is None:
+        vote_result = ctx.get('sheriff_vote_result', 'elected')
     if vote_result == 'tie':
         return SHERIFF_PK_SPEECH
     return SHERIFF_ELECTION_RESULT
@@ -207,11 +187,21 @@ def _get_sheriff_voting_next(state: GameState) -> str:
 def _get_shoot_skill_next(state: GameState) -> str:
     """SHOOT_SKILL 后的条件转移"""
     ctx = getattr(state, '_transition_context', {})
-    pending = ctx.get('pending_shooters', [])
+    pending = getattr(state, 'pending_shooters', None)
+    if pending is None:
+        pending = ctx.get('pending_shooters', [])
     if pending:
         return SHOOT_SKILL
     ctx.pop('pending_shooters', None)
     return SHERIFF_TRANSFER
+
+
+def _last_words_source(state: GameState) -> Optional[str]:
+    """兼容服务端显式字段与旧 transition context。"""
+    value = getattr(state, 'last_words_source', None)
+    if value is not None:
+        return value
+    return getattr(state, '_transition_context', {}).get('last_words_source')
 
 
 class StateMachine:
