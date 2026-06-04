@@ -361,6 +361,27 @@ class SkillLoader:
         finally:
             session.close()
 
+    def _load_versions_meta(self, skill_name: str) -> Dict[str, Any]:
+        """为 provider/agents 暴露版本元数据。"""
+        session = get_session()
+        try:
+            skill = session.query(EvolutionSkill).filter_by(skill_name=skill_name).first()
+            if not skill:
+                return {"current_default": None, "versions": {}}
+
+            versions = session.query(EvolutionSkillVersion).filter_by(
+                skill_id=skill.id
+            ).order_by(EvolutionSkillVersion.created_at.desc()).all()
+            return {
+                "current_default": skill.current_default,
+                "versions": {
+                    v.version: self._serialize_version(v)
+                    for v in versions
+                },
+            }
+        finally:
+            session.close()
+
     def get_version_content(self, skill_name: str, version: str) -> Optional[str]:
         """获取指定版本 Markdown 内容。"""
         session = get_session()

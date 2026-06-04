@@ -86,8 +86,8 @@ def _provider_public_urls() -> tuple[str, str]:
         return http_url, ws_url
 
     public_host = os.getenv("PROVIDER_PUBLIC_HOST", "").strip() or "172.17.0.1"
-    http_port = int(os.getenv("PROVIDER_PUBLIC_HTTP_PORT", "8083"))
-    ws_port = int(os.getenv("PROVIDER_PUBLIC_WS_PORT", "8082"))
+    http_port = int(os.getenv("PROVIDER_PUBLIC_HTTP_PORT", "7860"))
+    ws_port = int(os.getenv("PROVIDER_PUBLIC_WS_PORT", "7861"))
     return f"http://{public_host}:{http_port}", f"ws://{public_host}:{ws_port}"
 
 
@@ -127,10 +127,38 @@ def _list_provider_agents() -> list[dict]:
     _http_base, ws_base = _provider_public_urls()
     cfg = load_config()
     vm = VersionManager(cfg)
-    index = vm.loader.load_index()
+    try:
+        index = vm.loader.load_index()
+    except Exception:
+        logger.exception("Failed to load evolution skill index for provider agents")
+        return [
+            {
+                "external_agent_id": "default:common",
+                "agent_name": "DefaultAgent",
+                "client_type": "ws",
+                "client_url": ws_base,
+                "model_name": "werewolf-agent-langgraph",
+                "version": "default",
+                "health": "available",
+                "status": "available",
+                "metadata": {
+                    "mode": "default",
+                    "role_scope": "all",
+                    "skill_count": 0,
+                    "partial": True,
+                },
+            }
+        ]
     grouped: dict[str, list[dict]] = defaultdict(list)
     for skill in index:
-        role = skill.get("role") or "common"
+        if not isinstance(skill, dict):
+            logger.warning("Skip non-dict skill index entry: %r", skill)
+            continue
+        skill_name = str(skill.get("name") or "").strip()
+        if not skill_name:
+            logger.warning("Skip skill index entry without name: %r", skill)
+            continue
+        role = str(skill.get("role") or "common").strip() or "common"
         grouped[role].append(skill)
 
     result = [
@@ -155,15 +183,28 @@ def _list_provider_agents() -> list[dict]:
         if role == "common":
             continue
         for skill in skills:
-            meta = vm.loader._load_versions_meta(skill["name"]) or {}
+            skill_name = str(skill.get("name") or "").strip()
+            if not skill_name:
+                continue
+            try:
+                meta = vm.loader._load_versions_meta(skill_name) or {}
+            except Exception:
+                logger.exception("Failed to load version metadata for skill %s", skill_name)
+                continue
             versions = meta.get("versions", {})
+            if not isinstance(versions, dict):
+                logger.warning("Skip invalid versions metadata for skill %s: %r", skill_name, versions)
+                continue
             for version_name, version_meta in versions.items():
+                if not isinstance(version_meta, dict):
+                    logger.warning("Skip invalid version entry for skill %s version %s", skill_name, version_name)
+                    continue
                 if version_meta.get("status") != "candidate":
                     continue
                 result.append(
                     {
-                        "external_agent_id": f"skill:{skill['name']}:{version_name}:{role}",
-                        "agent_name": f"{skill['name']}:{version_name}",
+                        "external_agent_id": f"skill:{skill_name}:{version_name}:{role}",
+                        "agent_name": f"{skill_name}:{version_name}",
                         "client_type": "ws",
                         "client_url": ws_base,
                         "model_name": "werewolf-agent-langgraph",
@@ -173,7 +214,7 @@ def _list_provider_agents() -> list[dict]:
                         "metadata": {
                             "mode": "skill_override",
                             "role_scope": role,
-                            "skill_name": skill["name"],
+                            "skill_name": skill_name,
                             "skill_version": version_name,
                             "description": skill.get("description", ""),
                             "usage": version_meta.get("usage", {}),
