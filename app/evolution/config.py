@@ -51,8 +51,8 @@ class CuratorConfig:
 @dataclass
 class GEPAConfig:
     enabled: bool = True
-    min_games_for_fitness: int = 20
-    min_skills_in_library: int = 5
+    min_games_for_fitness: int = 5
+    min_skills_in_library: int = 2
     num_generations: int = 10
     population_size: int = 8
     mutation_model: str = "deepseek-chat"
@@ -62,7 +62,7 @@ class GEPAConfig:
 
 @dataclass
 class SummaryConfig:
-    model: str = "deepseek-chat"
+    model: str = "deepseek-v4-pro"
 
 
 @dataclass

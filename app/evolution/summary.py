@@ -6,6 +6,7 @@
 """
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional
+import logging
 
 from sqlalchemy import func
 
@@ -20,6 +21,8 @@ from evolution.models import (
     EvolutionGameArchive,
 )
 from agents.llm_caller import LLMCaller
+
+logger = logging.getLogger("evolution.summary")
 
 
 class EvolutionSummary:
@@ -303,24 +306,25 @@ class EvolutionSummary:
         llm.model = cfg.summary.model
 
         system_prompt = (
-            "你是狼人杀 AI 自进化系统的摘要撰写助手。"
-            "你的任务是根据系统活动的结构化数据，撰写一段自然流畅的中文摘要。"
-            "摘要应面向人类读者，使用叙事风格，避免生硬的枚举和符号。"
-            "如果某个分类在统计周期内没有活动，则不需要提及。"
-            "请按以下顺序组织内容：\n"
-            "1. 策略更新（哪些策略被更新、从哪个版本到哪个版本、基于多少建议）\n"
-            "2. 版本竞争（哪些候选版本胜率达标、晋升或降级情况）\n"
-            "3. 缓冲池确认（哪些集群被确认、一致率和因果强度如何）\n"
-            "4. 策略缺口（哪些场景缺乏策略覆盖、出现频次）\n"
-            "5. 策展人行动（上次运行时间、做了什么操作）\n"
-            "6. GEPA 离线进化（产生了哪些新版本）\n"
-            "7. 近期对局统计（总对局数、胜负比、各角色表现）\n\n"
-            "写作要求：\n"
-            "- 使用自然流畅的中文叙述，像向团队成员汇报一样\n"
-            "- 用具体的数字和事实支撑每条陈述\n"
-            "- 避免使用技术术语缩写或英文标识符，优先使用中文描述\n"
-            "- 每段聚焦一个主题，段落之间自然衔接\n"
-            "- 开头用一句话概括统计周期"
+            "你是狼人杀 AI 自进化系统的技术写手。"
+            "你的任务是根据系统活动的数据，写一段面向团队成员的中文总结。"
+            "写作风格：像团队周报一样，用自然流畅的中文讲述系统做了什么、发现了什么、改善了什么。\n\n"
+            "核心要求：\n"
+            "- 不要列举数据表格或编号列表，用叙述性语言串联信息\n"
+            "- 重点关注「变化」和「行动」，而非静态数据\n"
+            "- 如果某个模块没有活动，简单带过即可，不要说「本周期内无...」\n"
+            "- 开头用一句话概括本周期的整体节奏\n"
+            "- 每段聚焦一个主题，段落间自然过渡\n"
+            "- 用具体事实说话：哪个策略被更新了、因为什么、效果如何\n"
+            "- 如果系统发现了问题（如策略缺口），说明问题是什么、意味着什么\n\n"
+            "内容组织（按实际有内容的顺序写，没内容的跳过）：\n"
+            "1. 策略更新动态 — 哪些策略被改进/新增，基于什么信号\n"
+            "2. 版本竞争进展 — 候选版本表现如何，是否有版本晋升或降级\n"
+            "3. 缓冲池动态 — 新的建议在积累，哪些集群被确认通过\n"
+            "4. 发现的问题 — 策略缺口意味着什么场景缺乏指导\n"
+            "5. 策展人工作 — 上次做了什么维护操作\n"
+            "6. GEPA 进化 — 是否运行，产生了什么新策略\n"
+            "7. 整体对局表现 — 近期胜负趋势，各角色表现概览"
         )
 
         user_prompt = (
@@ -344,8 +348,13 @@ class EvolutionSummary:
                 ],
                 temperature=0.3,
             )
-            return resp.choices[0].message.content or ""
-        except Exception:
+            content = resp.choices[0].message.content or ""
+            if content and len(content) > 30:
+                return content
+            logger.warning(f"Summary LLM returned empty/short content: {content[:100]}")
+            return self._fallback_summary(since, activities)
+        except Exception as e:
+            logger.warning(f"Summary LLM call failed: {e}")
             return self._fallback_summary(since, activities)
 
     # ------------------------------------------------------------------
@@ -466,42 +475,67 @@ class EvolutionSummary:
         now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         since_str = datetime.fromisoformat(since).strftime("%Y-%m-%d")
 
-        parts = [f"自进化系统活动摘要（{since_str} 至 {now_str}）："]
+        parts = [f"自 {since_str} 至 {now_str}，自进化系统运行概况如下："]
 
         new_versions = activities.get("new_versions", [])
         if new_versions:
             names = [f"「{v['skill_name']}」{v['version']}" for v in new_versions]
-            parts.append(f"策略更新: {len(new_versions)} 个策略产生了新版本（{', '.join(names)}）。")
+            parts.append(f"系统完成了 {len(new_versions)} 个策略的版本更新（{', '.join(names)}），这些更新源自对局反思后的建议确认。")
         else:
-            parts.append("策略更新: 本周期内无新版本确认。")
+            parts.append("本周期内策略版本库没有新增确认。")
 
         promoted = activities.get("promoted_versions", [])
         active_count = sum(1 for v in promoted if v["status"] == "active")
         superseded_count = sum(1 for v in promoted if v["status"] == "superseded")
         if promoted:
-            parts.append(f"版本竞争: {active_count} 个版本晋升，{superseded_count} 个版本被取代。")
+            parts.append(f"版本竞争方面，{active_count} 个候选版本胜率达标成功晋升为活跃版本，{superseded_count} 个旧版本被替代。")
 
         confirmed = activities.get("confirmed_clusters", [])
         if confirmed:
-            parts.append(f"缓冲池确认: {len(confirmed)} 个集群通过确认阈值。")
+            parts.append(f"缓冲池中有 {len(confirmed)} 个建议集群通过了确认阈值，将进入策略更新管道。")
 
         gaps = activities.get("strategy_gaps", [])
         if gaps:
-            parts.append(f"策略缺口: {len(gaps)} 个场景缺乏策略覆盖。")
+            gap_desc = "、".join(g["scene_description"] for g in gaps[:3])
+            parts.append(f"系统发现 {len(gaps)} 个策略缺口，说明在「{gap_desc}」等场景下还缺乏有效的策略指导。")
 
         curator = activities.get("curator_summary", {})
         if curator.get("last_run_at"):
-            parts.append(f"策展人: 上次运行于 {curator['last_run_at']}。")
+            run_time = curator.get("last_run_at", "")
+            actions = curator.get("actions", {})
+            action_parts = []
+            if actions.get("staled"):
+                action_parts.append(f"标记过时 {len(actions['staled'])} 个")
+            if actions.get("archived"):
+                action_parts.append(f"归档 {len(actions['archived'])} 个")
+            if actions.get("patched"):
+                action_parts.append(f"修补 {len(actions['patched'])} 个")
+            if actions.get("consolidated"):
+                action_parts.append(f"合并 {len(actions['consolidated'])} 个")
+            if action_parts:
+                parts.append(f"策展人上次运行于 {run_time[:10]}，执行了{'、'.join(action_parts)}等维护操作。")
+            else:
+                parts.append(f"策展人上次运行于 {run_time[:10]}，本轮未做变更。")
 
         gepa = activities.get("gepa_summary", {})
         if gepa.get("new_versions"):
-            parts.append(f"GEPA 进化: 产生 {len(gepa['new_versions'])} 个新版本。")
+            parts.append(f"GEPA 离线进化在本周期产生了 {len(gepa['new_versions'])} 个新策略版本。")
 
         stats = activities.get("game_stats", {})
         total = stats.get("total", 0)
         if total > 0:
             win = stats.get("win", 0)
-            parts.append(f"对局统计: 共 {total} 局，胜 {win} 局，胜率 {win / total:.0%}。")
+            parts.append(f"近期共完成 {total} 局对局，胜 {win} 局，总胜率 {win / total:.0%}。")
+            by_role = stats.get("by_role", {})
+            if by_role:
+                role_parts = []
+                for role, rs in by_role.items():
+                    if rs["total"] > 0:
+                        role_parts.append(f"{role}{rs['win'] / rs['total']:.0%}胜率")
+                if role_parts:
+                    parts.append(f"各角色表现：{'、'.join(role_parts)}。")
+        else:
+            parts.append("本周期内暂无对局记录。")
 
         return "\n".join(parts)
 

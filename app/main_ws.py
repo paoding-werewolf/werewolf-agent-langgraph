@@ -1210,7 +1210,7 @@ _gepa_task: asyncio.Task | None = None
 async def _evo_gepa_trigger(request):
     global _gepa_task
     try:
-        from evolution.gepa import get_status as gepa_get_status, trigger as gepa_trigger
+        from evolution.gepa import get_status as gepa_get_status
 
         current = gepa_get_status()
         if current.get("status") == "running":
@@ -1218,14 +1218,29 @@ async def _evo_gepa_trigger(request):
                 {"detail": "GEPA is already running"}, status=409)
 
         from evolution.config import load_config
+        from evolution.gepa import GEPA
+
         cfg = load_config()
 
         if not cfg.gepa.enabled:
             return aiohttp_web.json_response(
                 {"detail": "GEPA is disabled in config"}, status=400)
 
-        gepa_trigger(cfg)
+        gepa = GEPA(cfg)
 
+        # Check prerequisites first
+        prereq = gepa._check_prerequisites()
+        if not prereq["ok"]:
+            return aiohttp_web.json_response(
+                {"detail": prereq["reason"]}, status=400)
+
+        # Initialize state to running
+        trigger_result = gepa.trigger(cfg)
+        if trigger_result.get("status") == "error":
+            return aiohttp_web.json_response(
+                {"detail": trigger_result.get("detail", "prerequisites failed")}, status=400)
+
+        # Launch background evolution
         async def _run_gepa_background():
             from evolution.gepa import run as gepa_run
             try:
@@ -1237,6 +1252,7 @@ async def _evo_gepa_trigger(request):
 
         return aiohttp_web.json_response({"status": "started"})
     except Exception as e:
+        logger.error(f"GEPA trigger error: {e}")
         return aiohttp_web.json_response({"detail": str(e)}, status=500)
 
 
