@@ -63,6 +63,10 @@ from utils.debug_view import render_prompts_html
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ws_agent_service")
 
+# 将 evolution.* WARNING+ 日志落盘到 MySQL
+from evolution.log_handler import install_evolution_log_handler
+install_evolution_log_handler()
+
 
 # 每个 session_id 一份独立状态; 空闲超过 TTL (默认 2h, 可配 SESSION_TTL_SECONDS) 后清理.
 store = SessionStore()
@@ -791,6 +795,7 @@ def _create_http_app():
     app.router.add_post("/evolution/gepa/cancel", _evo_gepa_cancel)
     app.router.add_post("/evolution/summary/generate", _evo_summary_generate)
     app.router.add_get("/evolution/summary/latest", _evo_summary_latest)
+    app.router.add_get("/evolution/logs", _evo_logs)
 
     return app
 
@@ -1304,6 +1309,49 @@ async def _evo_summary_latest(request):
         if result is None:
             return aiohttp_web.json_response({"summary_text": None, "generated_at": None})
         return aiohttp_web.json_response(result)
+    except Exception as e:
+        return aiohttp_web.json_response({"detail": str(e)}, status=500)
+
+
+async def _evo_logs(request):
+    """查询自进化管道日志。支持 ?level=WARNING&logger=reflection&limit=100&hours=24"""
+    try:
+        from evolution.db import get_session
+        from evolution.models import EvolutionPipelineLog
+        from sqlalchemy import desc
+
+        level = request.query.get("level", "")
+        logger_name = request.query.get("logger", "")
+        limit = min(int(request.query.get("limit", "100")), 500)
+        hours = int(request.query.get("hours", "72"))
+
+        session = get_session()
+        try:
+            from datetime import timedelta
+            cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=hours)
+            q = session.query(EvolutionPipelineLog).filter(
+                EvolutionPipelineLog.created_at >= cutoff
+            )
+            if level:
+                q = q.filter(EvolutionPipelineLog.level == level)
+            if logger_name:
+                q = q.filter(EvolutionPipelineLog.logger_name.like(f"{logger_name}%"))
+            q = q.order_by(desc(EvolutionPipelineLog.created_at)).limit(limit)
+
+            logs = [
+                {
+                    "id": row.id,
+                    "logger": row.logger_name,
+                    "level": row.level,
+                    "message": row.message,
+                    "session_id": row.session_id,
+                    "created_at": row.created_at.isoformat() if row.created_at else None,
+                }
+                for row in q.all()
+            ]
+            return aiohttp_web.json_response({"logs": logs, "count": len(logs)})
+        finally:
+            session.close()
     except Exception as e:
         return aiohttp_web.json_response({"detail": str(e)}, status=500)
 

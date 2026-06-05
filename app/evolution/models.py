@@ -99,3 +99,14 @@ class EvolutionRuntimeState(Base):
     payload_json: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DATETIME, default=_utc_now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DATETIME, default=_utc_now, nullable=False)
+
+
+class EvolutionPipelineLog(Base):
+    __tablename__ = "evolution_pipeline_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    logger_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    level: Mapped[str] = mapped_column(String(16), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    session_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DATETIME, default=_utc_now, nullable=False)
