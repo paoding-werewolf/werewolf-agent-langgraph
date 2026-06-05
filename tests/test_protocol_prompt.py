@@ -43,6 +43,7 @@ def test_normalize_wire_status_for_event_and_action():
     assert normalize_status("wolf_chat") == "wolf_chat"
     assert normalize_status("hunter", mode="event") == "shoot_begin"
     assert normalize_status("hunter", mode="action") == "shoot_skill"
+    assert normalize_status("shoot_reminder") == "shoot_reminder"
     assert normalize_action_status("skill", message="请选择查验目标") == "seer_check"
     assert normalize_action_status("skill", previous_phase="guard_action") == "guard_action"
     assert normalize_event_status(
@@ -60,6 +61,8 @@ def test_normalize_wire_status_for_event_and_action():
         message="3号 开枪带走了 4号",
     ) == "shoot_skill"
     assert normalize_event_status("hunter", [], message="3号 死亡，请发动技能") == "shoot_begin"
+    assert normalize_event_status("shoot_reminder", [], message="你可以开枪") == "shoot_reminder"
+    assert normalize_event_status("skill_result", [], message="你被毒杀，无法开枪") == "shoot_reminder"
 
 
 def test_route_uses_current_action_status_not_previous_phase():
