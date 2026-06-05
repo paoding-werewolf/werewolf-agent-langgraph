@@ -2,11 +2,14 @@
 
 将 pending 中的建议按场景标签分组，然后在组内做语义一致性检查。
 """
+import logging
 from typing import List, Dict
 
 from evolution.config import EvolutionConfig
 from evolution.buffer_pool import BufferPool
 from agents.llm_caller import LLMCaller
+
+logger = logging.getLogger("evolution.clustering")
 
 
 class SuggestionClusterer:
@@ -22,6 +25,7 @@ class SuggestionClusterer:
         """处理所有 pending 建议，归入或创建 cluster。"""
         processed = []
         pending = self.pool.load_pending()
+        logger.info(f"Processing {len(pending)} pending suggestions")
 
         for suggestion in pending:
             result = self._assign_to_cluster(suggestion)
@@ -30,6 +34,7 @@ class SuggestionClusterer:
                 "action": result["action"],
                 "cluster_id": result.get("cluster_id"),
             })
+            logger.info(f"Suggestion {suggestion.get('suggestion_id', '?')}: {result['action']} -> {result.get('cluster_id', 'N/A')}")
             self.pool.delete_pending(suggestion.get("suggestion_id", ""))
 
         return processed
@@ -42,7 +47,8 @@ class SuggestionClusterer:
         best_match = None
         best_score = 0
 
-        for cluster_id in self.pool.list_clusters():
+        cluster_ids = self.pool.list_clusters()
+        for cluster_id in cluster_ids:
             cluster = self.pool.load_cluster(cluster_id)
             if not cluster:
                 continue
@@ -65,10 +71,13 @@ class SuggestionClusterer:
                     cluster["suggestions"] = cluster["suggestions"][-self.cfg.buffer.max_cluster_size:]
 
                 self.pool.save_cluster(best_match, cluster)
+                logger.info(f"Added to existing cluster: {best_match} (score={best_score:.2f}, total_suggestions={len(cluster['suggestions'])})")
                 return {"action": "added_to_cluster", "cluster_id": best_match}
             else:
+                logger.info(f"Scene matched cluster {best_match} (score={best_score:.2f}) but semantic check failed or cluster missing, creating new cluster")
                 return self._create_cluster(suggestion, scene_tags, target_skill)
         else:
+            logger.info(f"No matching cluster found for target={target_skill} (best_score={best_score:.2f}, threshold={self.cfg.buffer.semantic_similarity_threshold}), creating new cluster")
             return self._create_cluster(suggestion, scene_tags, target_skill)
 
     def _create_cluster(self, suggestion: Dict, scene_tags: Dict, target_skill: str) -> Dict:
@@ -128,8 +137,10 @@ class SuggestionClusterer:
             for s in cluster["suggestions"]
         ]
         if new_direction == "discard" and "modify" in existing_directions:
+            logger.info(f"Semantic check: direction conflict (discard vs modify), returning inconsistent")
             return False
         if new_direction == "modify" and all(d == "discard" for d in existing_directions):
+            logger.info(f"Semantic check: direction conflict (modify vs all-discard), returning inconsistent")
             return False
 
         existing_texts = [
@@ -157,9 +168,13 @@ class SuggestionClusterer:
                 max_tokens=20,
             )
             answer = (resp.choices[0].message.content or "").strip().lower()
-            return "consistent" in answer
-        except Exception:
-            return False
+            result = "consistent" in answer
+            logger.info(f"Semantic LLM check: answer={answer!r}, result={'consistent' if result else 'inconsistent'}")
+            return result
+        except Exception as e:
+            # LLM 失败时默认允许归入 cluster，避免碎片化
+            logger.warning(f"Semantic LLM check failed: {e}, defaulting to consistent (allow merge)")
+            return True
 
     def _avg_causal_strength(self, suggestions: List[Dict]) -> float:
         strengths = [s.get("suggestion", {}).get("causal_strength", 0) for s in suggestions]

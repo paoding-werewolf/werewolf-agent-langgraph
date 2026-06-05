@@ -5,6 +5,7 @@
   Layer 2 (对局开始时): 当前角色+当前阶段相关的 1-3 个策略全文
   Layer 3 (反思时): 按需加载非默认版本，用于对比
 """
+import logging
 import random
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone
@@ -14,6 +15,8 @@ from sqlalchemy import func
 from evolution.config import EvolutionConfig
 from evolution.db import get_session
 from evolution.models import EvolutionSkill, EvolutionSkillVersion
+
+logger = logging.getLogger("evolution.skill_loader")
 
 
 class SkillLoader:
@@ -141,6 +144,7 @@ class SkillLoader:
                 self._check_promotion(session, skill, v)
 
             session.commit()
+            logger.debug(f"Version usage recorded: {skill_name} {version}, games={v.games_played}, wins={v.wins}, win_rate={v.win_rate:.2f}")
         except Exception:
             session.rollback()
             raise
@@ -161,6 +165,7 @@ class SkillLoader:
                 candidate.status = "active"
                 skill.current_default = candidate.version
                 current.status = "superseded"
+                logger.info(f"Version PROMOTED: {skill.skill_name} {candidate.version} (games={candidate.games_played}, win_rate={candidate.win_rate:.2f}) superseded {current_default} (win_rate={current.win_rate:.2f})")
 
     def create_new_version(self, skill_name: str, content: str,
                            source: str = "debounced_update",
@@ -180,6 +185,7 @@ class SkillLoader:
                 )
                 session.add(skill)
                 session.flush()
+                logger.info(f"Created new skill entry: {skill_name} (role={role})")
 
             existing_versions = session.query(EvolutionSkillVersion).filter_by(
                 skill_id=skill.id
@@ -207,17 +213,24 @@ class SkillLoader:
             session.add(version)
             session.flush()
 
-            if not existing_versions:
+            # If current_default points to a nonexistent version (ghost default),
+            # or this is the first version, set it as the new default and mark active
+            if not existing_versions or not session.query(EvolutionSkillVersion).filter_by(
+                skill_id=skill.id, version=skill.current_default
+            ).first():
                 skill.current_default = version_name
+                version.status = "active"
 
             max_v = self.cfg.versioning.max_versions_per_skill
             if len(existing_versions) + 1 > max_v:
                 self._prune_old_versions(session, skill, max_v)
 
             session.commit()
+            logger.info(f"Created new version: {skill_name} {version_name} (source={source}, cluster={trigger_cluster or 'N/A'})")
             return version_name
         except Exception:
             session.rollback()
+            logger.exception(f"Failed to create new version for {skill_name}")
             raise
         finally:
             session.close()

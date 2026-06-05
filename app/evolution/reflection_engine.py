@@ -4,6 +4,7 @@
 输出：ReflectionResult（因果链 + 策略建议 + 场景标签 + 置信度）
 """
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
@@ -11,6 +12,8 @@ from datetime import datetime, timezone
 
 from agents.llm_caller import LLMCaller
 from evolution.config import EvolutionConfig
+
+logger = logging.getLogger("evolution.reflection")
 
 
 # ── 数据结构 ────────────────────────────────────────────────
@@ -165,6 +168,7 @@ class ReflectionEngine:
 
         parsed = self._parse_reflection_yaml(response)
         if not parsed:
+            logger.warning(f"Reflection YAML parse failed for game={game_id}, raw response length={len(response)}, first 200 chars: {response[:200]}")
             return None
 
         suggestion_id = f"sug_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{game_id}"
@@ -192,6 +196,8 @@ class ReflectionEngine:
         if suggestion.match_level == "medium":
             suggestion.causal_strength *= self.cfg.medium_match_causal_discount
 
+        logger.info(f"Reflection success: game={game_id}, role={my_role}, result={result}, target_skill={suggestion.target_skill}, match_level={suggestion.match_level}, direction={suggestion.direction}, causal={suggestion.causal_strength:.2f}, confidence={suggestion.confidence:.2f}")
+
         return ReflectionResult(
             suggestion_id=suggestion_id,
             game_id=game_id,
@@ -215,8 +221,11 @@ class ReflectionEngine:
                 ],
                 temperature=0.3,
             )
-            return resp.choices[0].message.content or ""
+            content = resp.choices[0].message.content or ""
+            logger.debug(f"Reflection LLM response length={len(content)}")
+            return content
         except Exception as e:
+            logger.error(f"Reflection LLM call failed: {e}")
             return f"ERROR: {e}"
 
     def _parse_reflection_yaml(self, text: str) -> Optional[Dict]:
@@ -230,8 +239,13 @@ class ReflectionEngine:
             yaml_text = text
 
         try:
-            return _yaml.safe_load(yaml_text)
-        except Exception:
+            result = _yaml.safe_load(yaml_text)
+            if not isinstance(result, dict):
+                logger.warning(f"Reflection YAML parsed but result is {type(result).__name__}, not dict")
+                return None
+            return result
+        except Exception as e:
+            logger.warning(f"Reflection YAML parse error: {e}, yaml_text length={len(yaml_text)}, first 300 chars: {yaml_text[:300]}")
             return None
 
 

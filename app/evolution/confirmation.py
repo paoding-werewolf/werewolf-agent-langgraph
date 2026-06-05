@@ -6,11 +6,14 @@
 
 特殊通道：高因果强度快速确认（causal_strength ≥ 0.8 → 只需 2 次）
 """
+import logging
 from typing import Dict
 
 from evolution.config import EvolutionConfig
 from evolution.buffer_pool import BufferPool
 from evolution.version_manager import VersionManager
+
+logger = logging.getLogger("evolution.confirmation")
 
 
 class ConfirmationJudge:
@@ -23,7 +26,10 @@ class ConfirmationJudge:
     def check_all_clusters(self) -> list:
         """遍历所有 cluster，执行确认判定。"""
         confirmed = []
-        for cluster_id in self.buffer_pool.list_clusters():
+        cluster_ids = self.buffer_pool.list_clusters()
+        logger.info(f"Checking {len(cluster_ids)} clusters for confirmation")
+
+        for cluster_id in cluster_ids:
             cluster = self.buffer_pool.load_cluster(cluster_id)
             if not cluster:
                 continue
@@ -34,8 +40,12 @@ class ConfirmationJudge:
                     "cluster_id": cluster_id,
                     **result,
                 })
+                logger.info(f"Cluster CONFIRMED: {cluster_id} — {result['reason']}")
                 self._execute_confirmation(cluster, cluster_id)
+            else:
+                logger.info(f"Cluster not confirmed: {cluster_id} — {result['reason']}")
 
+        logger.info(f"Confirmation done: {len(confirmed)}/{len(cluster_ids)} confirmed")
         return confirmed
 
     def judge(self, cluster: Dict) -> Dict:
@@ -115,8 +125,10 @@ class ConfirmationJudge:
         suggestions = cluster.get("suggestions", [])
 
         if not target_skill or not suggestions:
+            logger.warning(f"Cannot execute confirmation for {cluster_id}: missing target_skill or suggestions")
             return
 
+        logger.info(f"Executing confirmation: cluster={cluster_id}, target_skill={target_skill}, suggestions={len(suggestions)}")
         new_content = self._synthesize_strategy(suggestions, target_skill)
 
         self.version_manager.create_new_version(
@@ -127,6 +139,7 @@ class ConfirmationJudge:
         )
 
         self.buffer_pool.move_to_confirmed(cluster_id)
+        logger.info(f"Confirmation complete: new version created for {target_skill}, cluster {cluster_id} moved to confirmed")
 
     def _synthesize_strategy(self, suggestions: list, target_skill: str) -> str:
         """将多条建议合成为一份完整的策略文档。"""
@@ -178,8 +191,11 @@ class ConfirmationJudge:
                 ],
                 temperature=0.3,
             )
-            return resp.choices[0].message.content or ""
-        except Exception:
+            content = resp.choices[0].message.content or ""
+            logger.info(f"Strategy synthesis LLM success for {target_skill}, content_len={len(content)}")
+            return content
+        except Exception as e:
+            logger.warning(f"Strategy synthesis LLM failed for {target_skill}: {e}, using fallback")
             return self._fallback_synthesize(suggestions, target_skill)
 
     def _format_causal_chain(self, chain: list) -> str:

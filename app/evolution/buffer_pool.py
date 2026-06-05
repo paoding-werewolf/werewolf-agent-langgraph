@@ -5,6 +5,7 @@
   2. 按场景标签路由到 pending 或 cluster
   3. 管理建议生命周期（过期清理）
 """
+import logging
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Optional, Any
 
@@ -15,6 +16,8 @@ from evolution.db import get_session
 from evolution.models import EvolutionBufferItem
 from evolution.reflection_engine import ReflectionResult
 
+logger = logging.getLogger("evolution.buffer_pool")
+
 
 class BufferPool:
     def __init__(self, cfg: EvolutionConfig):
@@ -24,8 +27,14 @@ class BufferPool:
         """接收一条反思结果，写入缓冲池。"""
         sug = result.suggestion
 
-        if sug.match_level in ("low", "strategy_gap"):
+        if sug.match_level == "strategy_gap":
+            logger.info(f"Ingest skipped: match_level=strategy_gap, target={sug.target_skill}")
             return "skipped"
+
+        if sug.match_level == "low":
+            # low 不再丢弃，打折 causal_strength 后允许进入管道
+            sug.causal_strength *= 0.5
+            logger.info(f"Ingest low→buffered with 0.5 causal discount: target={sug.target_skill}, original_causal={result.suggestion.causal_strength:.2f}, discounted={sug.causal_strength:.2f}")
 
         payload = self._result_to_dict(result)
         preview_texts = []
@@ -48,9 +57,11 @@ class BufferPool:
             )
             session.add(item)
             session.commit()
+            logger.info(f"Ingest buffered: id={item.id}, target={sug.target_skill}, match_level={sug.match_level}, causal={sug.causal_strength:.2f}")
             return "buffered"
         except Exception:
             session.rollback()
+            logger.exception(f"Ingest failed: target={sug.target_skill}")
             raise
         finally:
             session.close()
@@ -60,6 +71,7 @@ class BufferPool:
         session = get_session()
         try:
             items = session.query(EvolutionBufferItem).filter_by(item_type="pending").all()
+            logger.debug(f"Loaded {len(items)} pending items")
             return [item.payload_json for item in items]
         finally:
             session.close()
@@ -123,6 +135,7 @@ class BufferPool:
                 item.target_skill_name = data.get("target_skill", "")
                 item.payload_json = data
                 item.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                logger.info(f"Cluster updated: {cluster_id}, count={len(suggestions)}, causal={data.get('avg_causal_strength', 0):.2f}, consist={data.get('consistency_rate', 0):.2f}")
             else:
                 item = EvolutionBufferItem(
                     item_type="cluster",
@@ -137,6 +150,7 @@ class BufferPool:
                     payload_json=data,
                 )
                 session.add(item)
+                logger.info(f"Cluster created: {cluster_id}, target={data.get('target_skill', '')}, count={len(suggestions)}")
             session.commit()
         except Exception:
             session.rollback()
@@ -154,6 +168,7 @@ class BufferPool:
             if item:
                 session.delete(item)
                 session.commit()
+                logger.debug(f"Pending deleted: {suggestion_id}")
         except Exception:
             session.rollback()
             raise
@@ -172,6 +187,7 @@ class BufferPool:
                 item.status = "confirmed"
                 item.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
                 session.commit()
+                logger.info(f"Cluster confirmed: {cluster_id}")
         except Exception:
             session.rollback()
             raise
@@ -194,6 +210,7 @@ class BufferPool:
                     count += 1
             if count:
                 session.commit()
+                logger.info(f"Expired {count} old suggestions (cutoff={cutoff_naive})")
             return count
         except Exception:
             session.rollback()
