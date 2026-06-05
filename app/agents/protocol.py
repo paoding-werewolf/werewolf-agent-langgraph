@@ -19,6 +19,7 @@ EVENT_STATUS_MAP = {
     "sheriff_pk": "sheriff_pk_speech",
     "sheriff": "sheriff_election_result",
     "hunter": "shoot_begin",
+    "shoot_reminder": "shoot_reminder",
     "result": "game_over",
 }
 
@@ -78,6 +79,8 @@ def normalize_event_status(status: Any, traces: Iterable[dict] | None = None, *,
         return "shoot_begin"
 
     if value == "skill_result":
+        if "你可以开枪" in text or "无法开枪" in text:
+            return "shoot_reminder"
         if actions & {"guard_protect"}:
             return "guard_action"
         if actions & {"wolf_kill"}:

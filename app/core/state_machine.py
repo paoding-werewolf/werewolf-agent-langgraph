@@ -57,12 +57,12 @@ ALL_PHASES = [
     WOLF_KILL_BEGIN, WOLF_KILL,
     SEER_CHECK_BEGIN, SEER_CHECK, 
     WITCH_ACTION_BEGIN, WITCH_ACTION, 
-    DEATH_SETTLEMENT,
-    SHOOT_REMINDER, DAWN_REPORT,
+    SHOOT_REMINDER,
     ELECTION_BEGIN, SHERIFF_ELECTION_SIGNUP, SHERIFF_ELECTION_SPEECH,
     SHERIFF_ELECTION_VOTE_BEGIN,
     SHERIFF_ELECTION_VOTE, SHERIFF_ELECTION_RESULT,
     SHERIFF_PK_SPEECH, SHERIFF_PK_VOTE,
+    DEATH_SETTLEMENT, DAWN_REPORT,
     DISCUSS_BEGIN,
     SHERIFF_CHOOSE, DISCUSSION, VOTE,
     SHOOT_BEGIN,
@@ -100,6 +100,28 @@ def _resolve_skip(state: GameState, phase: str) -> str:
     return phase
 
 
+def _get_witch_action_next(state: GameState) -> str:
+    if (
+        state.round == 1
+        and state.sheriff is None
+        and not getattr(state, "night_shoot_reminder_sent", False)
+    ):
+        return SHOOT_REMINDER
+    return DEATH_SETTLEMENT
+
+
+def _get_shoot_reminder_next(state: GameState) -> str:
+    if state.round == 1 and state.sheriff is None and getattr(state, "death_result", None) is None:
+        return ELECTION_BEGIN
+    return DAWN_REPORT
+
+
+def _get_death_settlement_next(state: GameState) -> str:
+    if getattr(state, "night_shoot_reminder_sent", False):
+        return DAWN_REPORT
+    return SHOOT_REMINDER
+
+
 # 阶段转移函数：与 Mermaid 状态图完全对应
 PHASE_TRANSITIONS: Dict[str, Callable[[GameState], str]] = {
     # [*] --> START_GAME
@@ -120,11 +142,8 @@ PHASE_TRANSITIONS: Dict[str, Callable[[GameState], str]] = {
     SEER_CHECK: lambda s: WITCH_ACTION_BEGIN,
     WITCH_ACTION_BEGIN: lambda s: WITCH_ACTION,
 
-    # WITCH_ACTION --> ELECTION_BEGIN (首日先竞选) | DEATH_SETTLEMENT
-    WITCH_ACTION: lambda s: (
-        ELECTION_BEGIN if s.round == 1 and s.sheriff is None
-        else DEATH_SETTLEMENT
-    ),
+    # WITCH_ACTION --> SHOOT_REMINDER (首日警长报名前先提醒枪状态) | DEATH_SETTLEMENT
+    WITCH_ACTION: lambda s: _get_witch_action_next(s),
 
     # 警长选举
     ELECTION_BEGIN: lambda s: SHERIFF_ELECTION_SIGNUP,
@@ -142,8 +161,8 @@ PHASE_TRANSITIONS: Dict[str, Callable[[GameState], str]] = {
     SHERIFF_ELECTION_RESULT: lambda s: DEATH_SETTLEMENT,
 
     # 死亡结算
-    DEATH_SETTLEMENT: lambda s: SHOOT_REMINDER,
-    SHOOT_REMINDER: lambda s: DAWN_REPORT,
+    DEATH_SETTLEMENT: lambda s: _get_death_settlement_next(s),
+    SHOOT_REMINDER: lambda s: _get_shoot_reminder_next(s),
     DAWN_REPORT: lambda s: SHOOT_BEGIN,
 
     # 白天

@@ -29,6 +29,8 @@ class AgentGameState:
     sheriff: Optional[str] = None
     sheriff_candidates: List[str] = field(default_factory=list)
     dead_this_round: List[str] = field(default_factory=list)
+    death_result: Optional[Dict[str, Any]] = None
+    night_shoot_reminder_sent: bool = False
     winner: Optional[str] = None
     
     # AI 内部认知 (Belief Map)
