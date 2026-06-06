@@ -381,6 +381,7 @@ async def handle_connection(ws: ServerConnection):
                     msg.get("winner_role", ""),
                     msg.get("all_roles", {}),
                     msg.get("skip_evolution", False),
+                    msg.get("room_id", ""),
                 )
 
             elif msg_type == "buffer_status":
@@ -461,12 +462,16 @@ async def process_request(connection: ServerConnection, request: Request):
 async def _process_game_over(session_id: str, req_id: str,
                               result: str, winner_role: str,
                               all_roles: dict,
-                              skip_evolution: bool = False) -> dict:
+                              skip_evolution: bool = False,
+                              room_id: str = "") -> dict:
     """对局结束：触发反思 + 记忆更新 + 缓冲池操作。"""
     state = store.get(session_id)
     if state is None:
-        return {"type": "error", "req_id": req_id,
-                "detail": "Session not found."}
+        # Session 可能因容器重启被清理，仍写最小归档避免数据丢失
+        logger.warning(f"Session {session_id} not found for game_over (room={room_id}). "
+                       f"Saving minimal archive, skipping reflection pipeline.")
+        _save_minimal_archive(room_id or session_id, result, winner_role, all_roles)
+        return {"type": "game_over_ack", "req_id": req_id, "session_not_found": True}
 
     if skip_evolution:
         logger.info(f"Session {session_id}: skip_evolution=True (builtin AI in game), skipping post-game pipeline.")
@@ -500,6 +505,48 @@ def _extract_player_behavior(state: dict, player_id: str) -> str:
             behaviors.append(f"R{round_num} vote: {content}")
 
     return "\n".join(behaviors[:20]) if behaviors else ""
+
+
+def _save_minimal_archive(room_id: str, result: str, winner_role: str, all_roles: dict):
+    """Session 丢失时保存最小对局归档，确保数据不丢。"""
+    from evolution.db import get_session
+    from evolution.models import EvolutionGameArchive
+
+    # 从 all_roles 中推断 my_role（优先取 agent 对应的座位角色）
+    my_role = ""
+    if all_roles:
+        first_role = next(iter(all_roles.values()), "")
+        if first_role:
+            my_role = first_role
+
+    session = get_session()
+    try:
+        existing = session.query(EvolutionGameArchive).filter_by(game_id=room_id).first()
+        if existing:
+            # 已有归档则不重复写入
+            session.commit()
+            return
+        session.add(EvolutionGameArchive(
+            game_id=room_id,
+            room_id=room_id,
+            my_role=my_role,
+            result=result,
+            day_count=0,
+            has_builtin_ai=False,
+            payload_json={
+                "scene_tags": {"result": result, "wolf_aggression": "unknown"},
+                "note": "minimal archive — session lost before pipeline could run",
+                "winner_role": winner_role,
+                "all_roles": all_roles,
+            },
+        ))
+        session.commit()
+        logger.info(f"Minimal archive saved: room={room_id}, role={my_role}, result={result}")
+    except Exception:
+        session.rollback()
+        logger.exception(f"Failed to save minimal archive for room={room_id}")
+    finally:
+        session.close()
 
 
 async def _run_post_game_pipeline(state: dict, result: str,
@@ -757,6 +804,7 @@ async def _http_agent_game_over(request):
         data.get("winner_role", ""),
         data.get("all_roles", {}),
         data.get("skip_evolution", False),
+        data.get("room_id", ""),
     )
     return aiohttp_web.json_response(resp)
 
