@@ -57,8 +57,8 @@ class GEPAConfig:
     min_skills_in_library: int = 2
     num_generations: int = 10
     population_size: int = 8
-    mutation_model: str = "deepseek-chat"
-    judge_model: str = "deepseek-chat"
+    mutation_model: str = "deepseek-v4-pro"
+    judge_model: str = "deepseek-v4-pro"
     game_service_url: str = "http://host.docker.internal:8081"
 
 
@@ -77,7 +77,7 @@ class EvolutionConfig:
     curator: CuratorConfig = field(default_factory=CuratorConfig)
     gepa: GEPAConfig = field(default_factory=GEPAConfig)
     summary: SummaryConfig = field(default_factory=SummaryConfig)
-    clustering_model: str = "deepseek-chat"
+    clustering_model: str = "deepseek-v4-pro"
     reflection_model: str = ""
     in_game_flag_causal_multiplier: float = 1.3
     medium_match_causal_discount: float = 0.7

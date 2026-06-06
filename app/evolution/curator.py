@@ -6,12 +6,15 @@
 """
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional
+import logging
 
 from evolution.config import EvolutionConfig
 from evolution.db import get_session
 from evolution.models import EvolutionSkill, EvolutionSkillVersion, EvolutionRuntimeState
 from evolution.skill_loader import SkillLoader
 from agents.llm_caller import LLMCaller
+
+logger = logging.getLogger(__name__)
 
 
 class Curator:
@@ -237,7 +240,7 @@ class Curator:
                 if decision in answer:
                     return decision
         except Exception:
-            pass
+            logger.exception("LLM review call failed, defaulting to keep")
         return "keep"
 
     def _llm_patch_skill(self, content: str, usage: Dict, llm: LLMCaller) -> Optional[str]:
