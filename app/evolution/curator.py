@@ -233,7 +233,7 @@ class Curator:
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0,
-                max_tokens=20,
+                max_tokens=500,
             )
             answer = (resp.choices[0].message.content or "").strip().lower()
             for decision in ["keep", "patch", "consolidate", "archive"]:
