@@ -46,7 +46,29 @@ class Curator:
             if hours_since_game < self.cfg.curator.min_idle_hours:
                 return False
 
+        # 变动检测：只有当 confirmed 技能数或总对局数发生变化时才触发
+        current_confirmed, current_games = self._current_counts()
+        last_confirmed = state.get("last_confirmed_count", -1)
+        last_games = state.get("last_total_games", -1)
+        if current_confirmed == last_confirmed and current_games == last_games:
+            # 无变动，跳过本次，更新 last_run_at 避免频繁空跑
+            self._save_state({"last_run_at": now.isoformat()})
+            return False
+
         return True
+
+    def _current_counts(self) -> tuple:
+        """返回当前 (confirmed_count, total_games)。"""
+        from evolution.models import EvolutionBufferItem, EvolutionGameArchive
+        from sqlalchemy import func
+        session = get_session()
+        try:
+            confirmed = session.query(func.count(EvolutionBufferItem.id)).filter_by(
+                item_type="confirmed").scalar() or 0
+            games = session.query(func.count(EvolutionGameArchive.id)).scalar() or 0
+            return confirmed, games
+        finally:
+            session.close()
 
     def run(self) -> Dict:
         """执行 Curator 审查。返回操作摘要。"""
@@ -55,7 +77,12 @@ class Curator:
         summary["phase1"] = self._phase1_state_transitions()
         summary["phase2"] = self._phase2_llm_review()
 
-        self._save_state({"last_run_at": datetime.now(timezone.utc).isoformat()})
+        confirmed, games = self._current_counts()
+        self._save_state({
+            "last_run_at": datetime.now(timezone.utc).isoformat(),
+            "last_confirmed_count": confirmed,
+            "last_total_games": games,
+        })
 
         return summary
 

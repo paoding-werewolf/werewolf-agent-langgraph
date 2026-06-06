@@ -45,7 +45,7 @@ class VersioningConfig:
 @dataclass
 class CuratorConfig:
     enabled: bool = True
-    interval_hours: int = 168  # 7 days
+    interval_hours: int = 12  # 12 hours
     min_idle_hours: int = 2
     max_iterations: int = 8
 

@@ -521,6 +521,27 @@ def _run_global_evolution_pass(cfg) -> None:
     logger.info("Global evolution pass complete")
 
 
+_CURATOR_MONITOR_INTERVAL_S = 12 * 3600  # 12 hours
+
+
+async def _curator_monitor_loop(interval: float):
+    """每 interval 秒检查一次策略库变动，有变动则触发 Curator。"""
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            from evolution.config import load_config
+            from evolution.curator import Curator
+            cfg = load_config()
+            if not cfg.enabled or not cfg.curator.enabled:
+                continue
+            curator = Curator(cfg)
+            if curator.should_run(is_game_in_progress=False):
+                summary = curator.run()
+                logger.info(f"Curator monitor triggered: {summary}")
+        except Exception:
+            logger.exception("Curator monitor check failed")
+
+
 async def _process_game_over(session_id: str, req_id: str,
                               result: str, winner_role: str,
                               all_roles: dict,
@@ -1475,6 +1496,7 @@ async def main(host: str = "0.0.0.0", port: int = 7861, http_port: int = 7860):
 
     cleanup_interval = min(max(store.ttl / 4, 60.0), 300.0)
     cleanup_task = asyncio.create_task(_cleanup_loop(cleanup_interval))
+    curator_monitor_task = asyncio.create_task(_curator_monitor_loop(_CURATOR_MONITOR_INTERVAL_S))
 
     # ── HTTP 兼容服务 ──
     http_runner = None
@@ -1502,6 +1524,7 @@ async def main(host: str = "0.0.0.0", port: int = 7861, http_port: int = 7860):
     if http_runner:
         await http_runner.cleanup()
     cleanup_task.cancel()
+    curator_monitor_task.cancel()
 
 
 if __name__ == "__main__":
