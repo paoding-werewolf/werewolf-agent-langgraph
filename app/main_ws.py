@@ -460,6 +460,67 @@ async def process_request(connection: ServerConnection, request: Request):
 
 # ── game_over 处理 ────────────────────────────────────────
 
+# 全局进化批跑（去抖动：把 12 席并发坍缩为每局一次）
+# 每局 12 个外部 agent 各自发 game_over。过去每席都内联跑全局聚类/确认/
+# Curator，导致 12 倍冗余与缓冲池竞态（曾因并发确认撞 uk 唯一键而崩）。
+# 改为：每席只反思 + 入池；聚类/确认/过期清理/Curator 由一个去抖动任务在
+# 最后一席入池后统一跑一次。
+_global_pass_lock = asyncio.Lock()
+_global_pass_task = None
+_GLOBAL_PASS_DEBOUNCE_S = 8.0
+
+
+async def _schedule_global_evolution_pass(cfg) -> None:
+    """安排一次全局进化批跑；新的入池会重置去抖动计时，把并发坍缩为一次。"""
+    global _global_pass_task
+    if _global_pass_task is not None and not _global_pass_task.done():
+        _global_pass_task.cancel()
+    _global_pass_task = asyncio.create_task(_debounced_global_pass(cfg))
+
+
+async def _debounced_global_pass(cfg) -> None:
+    try:
+        await asyncio.sleep(_GLOBAL_PASS_DEBOUNCE_S)
+    except asyncio.CancelledError:
+        return
+    async with _global_pass_lock:
+        try:
+            await asyncio.to_thread(_run_global_evolution_pass, cfg)
+        except Exception:
+            logger.exception("Global evolution pass failed")
+
+
+def _run_global_evolution_pass(cfg) -> None:
+    """池级 聚类 → 确认 → 过期清理 → Curator，每局只跑一次（线程内执行，不阻塞事件循环）。"""
+    from datetime import datetime, timezone
+    from evolution.buffer_pool import BufferPool
+    from evolution.clustering import SuggestionClusterer
+    from evolution.confirmation import ConfirmationJudge
+    from evolution.version_manager import VersionManager
+    from evolution.curator import Curator
+
+    pool = BufferPool(cfg)
+    vm = VersionManager(cfg)
+
+    clusterer = SuggestionClusterer(cfg, pool)
+    clusterer.process_pending()
+
+    judge = ConfirmationJudge(cfg, pool, vm)
+    judge.check_all_clusters()
+
+    pool.expire_old_suggestions()
+
+    curator = Curator(cfg)
+    curator._save_state({"last_game_end_at": datetime.now(timezone.utc).isoformat()})
+    if curator.should_run(is_game_in_progress=False):
+        try:
+            summary = curator.run()
+            logger.info(f"Curator run completed: {summary}")
+        except Exception as e:
+            logger.warning(f"Curator run failed: {e}")
+    logger.info("Global evolution pass complete")
+
+
 async def _process_game_over(session_id: str, req_id: str,
                               result: str, winner_role: str,
                               all_roles: dict,
@@ -556,8 +617,6 @@ async def _run_post_game_pipeline(state: dict, result: str,
         from evolution.config import load_config
         from evolution.reflection_engine import ReflectionEngine, format_game_trace
         from evolution.buffer_pool import BufferPool
-        from evolution.clustering import SuggestionClusterer
-        from evolution.confirmation import ConfirmationJudge
         from evolution.version_manager import VersionManager
         from memory.game_archive import save_game, record_strategy_gap
         from memory.self_model import update_self_model
@@ -606,15 +665,10 @@ async def _run_post_game_pipeline(state: dict, result: str,
 
         if reflection:
             # 5. Write to buffer pool
-            buffer_status = pool.ingest(reflection)
+            pool.ingest(reflection)
 
-            # 6. Trigger clustering
-            clusterer = SuggestionClusterer(cfg, pool)
-            clusterer.process_pending()
-
-            # 7. Check confirmation
-            judge = ConfirmationJudge(cfg, pool, vm)
-            confirmed = judge.check_all_clusters()
+            # 6+7. 聚类/确认改为每局去抖动统一跑一次（坍缩 12 席并发，见 _schedule_global_evolution_pass）
+            await _schedule_global_evolution_pass(cfg)
 
             # 8. Record strategy_gap
             if reflection.suggestion.match_level in ("low", "strategy_gap"):
@@ -671,22 +725,7 @@ async def _run_post_game_pipeline(state: dict, result: str,
             for skill_name, version in versions_used.items():
                 vm.record_usage(skill_name, version, won)
 
-        # 11. Expire old suggestions
-        pool.expire_old_suggestions()
-
-        # 11.5 Record game end time for Curator idle tracking (MySQL)
-        from evolution.curator import Curator
-        from datetime import datetime, timezone
-        curator = Curator(cfg)
-        curator._save_state({"last_game_end_at": datetime.now(timezone.utc).isoformat()})
-
-        # 12. Check if Curator should run
-        if curator.should_run(is_game_in_progress=False):
-            try:
-                summary = curator.run()
-                logger.info(f"Curator run completed: {summary}")
-            except Exception as e:
-                logger.warning(f"Curator run failed: {e}")
+        # 11/12. 过期清理 + Curator 已并入 _run_global_evolution_pass（每局一次）
 
         logger.info(f"Post-game pipeline complete for session {session_id}: result={result}")
     except Exception:

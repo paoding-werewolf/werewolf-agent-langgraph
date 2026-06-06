@@ -176,18 +176,42 @@ class BufferPool:
             session.close()
 
     def move_to_confirmed(self, cluster_id: str):
-        """将 cluster 移入 confirmed。"""
+        """将 cluster 移入 confirmed。
+
+        幂等：若已存在同 item_key 的 confirmed 行（历史遗留或并发确认产生），
+        则把新簇数据并入该行并删除重复的 cluster 行，避免翻转 item_type 时撞
+        uk_evolution_buffer_item 唯一键导致整轮确认中断。
+        """
         session = get_session()
         try:
             item = session.query(EvolutionBufferItem).filter_by(
                 item_type="cluster", item_key=cluster_id
             ).first()
-            if item:
-                item.item_type = "confirmed"
-                item.status = "confirmed"
-                item.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            if not item:
+                return
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            existing = session.query(EvolutionBufferItem).filter_by(
+                item_type="confirmed", item_key=cluster_id
+            ).first()
+            if existing and existing.id != item.id:
+                existing.suggestion_count = max(existing.suggestion_count or 0,
+                                                item.suggestion_count or 0)
+                existing.avg_causal_strength = item.avg_causal_strength
+                existing.consistency_rate = item.consistency_rate
+                existing.scene_tags_json = item.scene_tags_json
+                existing.preview_texts_json = item.preview_texts_json
+                existing.payload_json = item.payload_json
+                existing.target_skill_name = item.target_skill_name
+                existing.updated_at = now
+                session.delete(item)
                 session.commit()
-                logger.info(f"Cluster confirmed: {cluster_id}")
+                logger.info(f"Cluster merged into existing confirmed (idempotent): {cluster_id}")
+                return
+            item.item_type = "confirmed"
+            item.status = "confirmed"
+            item.updated_at = now
+            session.commit()
+            logger.info(f"Cluster confirmed: {cluster_id}")
         except Exception:
             session.rollback()
             raise

@@ -36,12 +36,17 @@ class ConfirmationJudge:
 
             result = self.judge(cluster)
             if result["confirmed"]:
+                try:
+                    self._execute_confirmation(cluster, cluster_id)
+                except Exception:
+                    # 单簇执行失败不应中断整轮确认，否则后续簇全部丢失
+                    logger.exception(f"Cluster confirmation execution failed, skipping: {cluster_id}")
+                    continue
                 confirmed.append({
                     "cluster_id": cluster_id,
                     **result,
                 })
                 logger.info(f"Cluster CONFIRMED: {cluster_id} — {result['reason']}")
-                self._execute_confirmation(cluster, cluster_id)
             else:
                 logger.info(f"Cluster not confirmed: {cluster_id} — {result['reason']}")
 

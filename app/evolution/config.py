@@ -5,6 +5,8 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
 
+AGENT_HOME = Path(os.getenv("WEREWOLF_AGENT_HOME", "~/.werewolf-agent")).expanduser()
+
 
 @dataclass
 class ReflectionConfig:
