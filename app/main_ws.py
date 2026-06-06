@@ -695,28 +695,32 @@ async def _run_post_game_pipeline(state: dict, result: str,
                 strategies_used=state.get("strategies_used", []),
             )
 
-        # 10. Update self model
-        update_self_model(
-            my_role=state["my_role"],
-            result=result,
-            key_decisions=state.get("last_thought", ""),
-            llm_caller=llm,
+        # 10. Update self model (sync LLM → to_thread to avoid blocking event loop)
+        await asyncio.to_thread(
+            update_self_model,
+            state["my_role"],
+            result,
+            state.get("last_thought", ""),
+            llm,
         )
 
-        # 10.1 Update opponent models (Layer 2)
+        # 10.1 Update opponent models (Layer 2) — concurrent to_thread to avoid blocking
         from memory.opponent_model import update_opponent_from_game
         my_seat = state.get("me_id", "")
+        opponent_tasks = []
         for player_id, player_role in (all_roles or {}).items():
             if player_id == my_seat:
                 continue
             behavior_summary = _extract_player_behavior(state, player_id)
             if behavior_summary:
-                update_opponent_from_game(
-                    player_id=player_id,
-                    role=player_role,
-                    behavior_summary=behavior_summary,
-                    llm_caller=llm,
+                opponent_tasks.append(
+                    asyncio.to_thread(
+                        update_opponent_from_game,
+                        player_id, player_role, behavior_summary, llm,
+                    )
                 )
+        if opponent_tasks:
+            await asyncio.gather(*opponent_tasks)
 
         # 10.5 Record version usage for version competition
         versions_used = state.get("versions_used", {})
