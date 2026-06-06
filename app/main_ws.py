@@ -540,8 +540,9 @@ async def _process_game_over(session_id: str, req_id: str,
         logger.info(f"Session {session_id}: skip_evolution=True (builtin AI in game), skipping post-game pipeline.")
         return {"type": "game_over_ack", "req_id": req_id, "skip_evolution": True}
 
+    state["room_id"] = room_id
     asyncio.create_task(_run_post_game_pipeline(
-        state, result, winner_role, all_roles, session_id, req_id
+        state, result, winner_role, all_roles, session_id, req_id, room_id
     ))
 
     return {"type": "game_over_ack", "req_id": req_id}
@@ -611,7 +612,8 @@ def _save_minimal_archive(room_id: str, result: str, winner_role: str, all_roles
 
 async def _run_post_game_pipeline(state: dict, result: str,
                                    winner_role: str, all_roles: dict,
-                                   session_id: str, req_id: str):
+                                   session_id: str, req_id: str,
+                                   room_id: str = ""):
     """对局结束后完整管道：反思 → 缓冲 → 记忆更新。"""
     try:
         from evolution.config import load_config
@@ -653,7 +655,7 @@ async def _run_post_game_pipeline(state: dict, result: str,
 
         engine = ReflectionEngine(cfg)
         reflection = engine.reflect(
-            game_id=state.get("room_id", "unknown"),
+            game_id=room_id or state.get("room_id", "unknown"),
             my_role=state["my_role"],
             my_seat=state["me_id"],
             result=result,
