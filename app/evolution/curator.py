@@ -148,8 +148,8 @@ class Curator:
                     break
 
                 current_v = session.query(EvolutionSkillVersion).filter_by(
-                    skill_id=skill.id, version=skill.current_default
-                ).first()
+                    skill_id=skill.id
+                ).order_by(EvolutionSkillVersion.id.desc()).first()
                 if not current_v:
                     continue
 
