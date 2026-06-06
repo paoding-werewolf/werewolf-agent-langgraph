@@ -7,6 +7,20 @@ from agents.llm_caller import llm
 from agents.prompt_builder import PromptBuilder
 from agents.protocol import normalize_action_status, normalize_event_status
 
+
+def _get_evolution_strategies(state: AgentState) -> str:
+    """从 state 读取 versions_used，按指定版本加载策略全文。"""
+    versions_used = state.get("versions_used", {})
+    if not versions_used:
+        return ""
+    from evolution.config import load_config
+    from evolution.version_manager import VersionManager
+    cfg = load_config()
+    vm = VersionManager(cfg)
+    return vm.format_skills_for_prompt(
+        state["my_role"], state.get("phase", ""), versions_used
+    )
+
 PRIVATE_NIGHT_ACTIONS = {
     "guard_action": Role.GUARD,
     "seer_check": Role.SEER,
@@ -111,7 +125,8 @@ async def _reflect_node(state: AgentState) -> AgentState:
     final_instr = "输出你的内心独白。请简洁且有逻辑。"
 
     gs = _to_agent_game_state(state)
-    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, "")
+    extra_data = {"evolution_strategies": _get_evolution_strategies(state)}
+    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, "", extra_data=extra_data)
 
     reflection = await llm.call_with_log(
         state["me_id"],
@@ -190,7 +205,7 @@ async def _decide_night_role(state: AgentState) -> AgentState:
 """
     final_instr = "使用适当的工具输出你的决策。"
 
-    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, state["last_thought"])
+    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, state["last_thought"], extra_data={"evolution_strategies": _get_evolution_strategies(state)})
 
     action = await llm.decide_with_tools(
         state["me_id"], f"{state['phase']}_act",
@@ -225,7 +240,7 @@ async def _decide_wolf_gesture(state: AgentState) -> AgentState:
 """
     final_instr = "使用适当的工具选择你的行动。"
 
-    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, state["last_thought"])
+    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, state["last_thought"], extra_data={"evolution_strategies": _get_evolution_strategies(state)})
 
     action = await llm.decide_with_tools(
         state["me_id"], f"{state['phase']}_act",
@@ -258,7 +273,7 @@ async def _decide_election(state: AgentState) -> AgentState:
 """
     final_instr = "使用 signup_sheriff、vote_sheriff 或 pass_turn。"
 
-    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, state["last_thought"])
+    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, state["last_thought"], extra_data={"evolution_strategies": _get_evolution_strategies(state)})
 
     action = await llm.decide_with_tools(
         state["me_id"], f"{state['phase']}_act",
@@ -297,7 +312,7 @@ async def _decide_discussion(state: AgentState) -> AgentState:
 """
     final_instr = "进行你的发言。"
 
-    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, state["last_thought"])
+    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, state["last_thought"], extra_data={"evolution_strategies": _get_evolution_strategies(state)})
 
     action = await llm.decide_with_tools(
         state["me_id"], f"{state['phase']}_act",
@@ -335,7 +350,7 @@ async def _decide_vote(state: AgentState) -> AgentState:
 """
     final_instr = "使用 vote 工具进行投票（或使用 pass_turn 弃权）。"
 
-    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, state["last_thought"])
+    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, state["last_thought"], extra_data={"evolution_strategies": _get_evolution_strategies(state)})
 
     action = await llm.decide_with_tools(
         state["me_id"], f"{state['phase']}_act",
@@ -372,7 +387,7 @@ async def _decide_shoot(state: AgentState) -> AgentState:
 """
     final_instr = "使用 shoot 工具。"
 
-    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, state["last_thought"])
+    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, state["last_thought"], extra_data={"evolution_strategies": _get_evolution_strategies(state)})
 
     action = await llm.decide_with_tools(
         state["me_id"], f"{state['phase']}_act",
@@ -412,7 +427,7 @@ async def _decide_generic(state: AgentState) -> AgentState:
 """
         final_instr = "如果没有要执行的操作，请使用 pass_turn，或者使用 speak/通用动作。"
 
-    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, state["last_thought"])
+    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, state["last_thought"], extra_data={"evolution_strategies": _get_evolution_strategies(state)})
 
     action = await llm.decide_with_tools(
         state["me_id"], f"{state['phase']}_act",

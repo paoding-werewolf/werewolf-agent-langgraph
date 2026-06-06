@@ -38,10 +38,17 @@ class VersionManager:
     def record_usage(self, skill_name: str, version: str, won: bool):
         self.loader.record_version_usage(skill_name, version, won)
 
-    def format_skills_for_prompt(self, my_role: str, phase: str) -> str:
-        """组装注入 prompt 的策略文本（Layer 1 索引 + Layer 2 全文）。"""
+    def format_skills_for_prompt(self, my_role: str, phase: str,
+                                  versions_used: Optional[dict] = None) -> str:
+        """组装注入 prompt 的策略文本（Layer 1 索引 + Layer 2 全文）。
+
+        如果 versions_used 非空，按指定版本加载；否则走 current_default。
+        """
         index_text = self.loader.format_index_for_prompt(my_role)
-        full_text = self.loader.load_skills_for_context(my_role, phase)
+        if versions_used:
+            full_text = self.loader.load_skills_with_versions(my_role, phase, versions_used)
+        else:
+            full_text = self.loader.load_skills_for_context(my_role, phase)
 
         parts = []
         if index_text:

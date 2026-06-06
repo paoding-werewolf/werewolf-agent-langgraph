@@ -97,6 +97,31 @@ class SkillLoader:
 
         return "\n\n".join(loaded_parts)
 
+    def load_skills_with_versions(self, my_role: str, phase: str,
+                                  versions_used: dict) -> str:
+        """与 load_skills_for_context 相同，但按 versions_used 指定版本加载。"""
+        skills = self.load_index()
+        relevant = [
+            s for s in skills
+            if s.get("role") in (my_role, "common")
+        ]
+
+        phase_tags = self._phase_to_tags(phase)
+        scored = []
+        for s in relevant:
+            overlap = len(set(s.get("tags", [])) & phase_tags)
+            scored.append((overlap, s))
+        scored.sort(key=lambda x: -x[0])
+
+        loaded_parts = []
+        for _, s in scored[:3]:
+            version = versions_used.get(s["name"])
+            content = self.load_skill_full(s["name"], version=version)
+            if content:
+                loaded_parts.append(f"### Strategy: {s['name']}\n{content}")
+
+        return "\n\n".join(loaded_parts)
+
     # ── 版本竞争相关 ─────────────────────────────────────────
 
     def get_version_for_game(self, skill_name: str) -> str:
