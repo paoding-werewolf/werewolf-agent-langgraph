@@ -382,6 +382,7 @@ async def handle_connection(ws: ServerConnection):
                     msg.get("all_roles", {}),
                     msg.get("skip_evolution", False),
                     msg.get("room_id", ""),
+                    msg.get("my_role", ""),
                 )
 
             elif msg_type == "buffer_status":
@@ -463,14 +464,15 @@ async def _process_game_over(session_id: str, req_id: str,
                               result: str, winner_role: str,
                               all_roles: dict,
                               skip_evolution: bool = False,
-                              room_id: str = "") -> dict:
+                              room_id: str = "",
+                              my_role: str = "") -> dict:
     """对局结束：触发反思 + 记忆更新 + 缓冲池操作。"""
     state = store.get(session_id)
     if state is None:
         # Session 可能因容器重启被清理，仍写最小归档避免数据丢失
         logger.warning(f"Session {session_id} not found for game_over (room={room_id}). "
                        f"Saving minimal archive, skipping reflection pipeline.")
-        _save_minimal_archive(room_id or session_id, result, winner_role, all_roles)
+        _save_minimal_archive(room_id or session_id, result, winner_role, all_roles, my_role)
         return {"type": "game_over_ack", "req_id": req_id, "session_not_found": True}
 
     if skip_evolution:
@@ -507,17 +509,14 @@ def _extract_player_behavior(state: dict, player_id: str) -> str:
     return "\n".join(behaviors[:20]) if behaviors else ""
 
 
-def _save_minimal_archive(room_id: str, result: str, winner_role: str, all_roles: dict):
+def _save_minimal_archive(room_id: str, result: str, winner_role: str, all_roles: dict, my_role: str = ""):
     """Session 丢失时保存最小对局归档，确保数据不丢。"""
     from evolution.db import get_session
     from evolution.models import EvolutionGameArchive
 
-    # 从 all_roles 中推断 my_role（优先取 agent 对应的座位角色）
-    my_role = ""
-    if all_roles:
-        first_role = next(iter(all_roles.values()), "")
-        if first_role:
-            my_role = first_role
+    # 优先使用后端传来的本席位角色；缺失时退回 all_roles 第一个
+    if not my_role and all_roles:
+        my_role = next(iter(all_roles.values()), "") or ""
 
     session = get_session()
     try:
@@ -805,6 +804,7 @@ async def _http_agent_game_over(request):
         data.get("all_roles", {}),
         data.get("skip_evolution", False),
         data.get("room_id", ""),
+        data.get("my_role", ""),
     )
     return aiohttp_web.json_response(resp)
 
