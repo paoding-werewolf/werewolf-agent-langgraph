@@ -40,12 +40,18 @@ class MySQLLogHandler(logging.Handler):
 
 
 def install_evolution_log_handler():
-    """为所有 evolution.* logger 安装 MySQL handler。"""
+    """为自进化相关 logger 安装 MySQL handler。
+
+    覆盖 evolution.* 命名空间，以及 main_ws 的 ws_agent_service logger
+    —— game_over / 局后管道 / minimal archive 的关键日志都在后者下，
+    否则面板回溯排查时这些失败全程无声。
+    """
     handler = MySQLLogHandler(level=logging.WARNING)
     handler.setFormatter(logging.Formatter(
         "%(asctime)s [%(name)s] %(levelname)s: %(message)s"
     ))
 
-    # 注册到 evolution 根 logger，所有子 logger 都会继承
-    evo_logger = logging.getLogger("evolution")
-    evo_logger.addHandler(handler)
+    for name in ("evolution", "ws_agent_service"):
+        target = logging.getLogger(name)
+        if not any(isinstance(h, MySQLLogHandler) for h in target.handlers):
+            target.addHandler(handler)
