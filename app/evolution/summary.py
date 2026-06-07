@@ -13,6 +13,8 @@ from sqlalchemy import func
 from evolution.config import EvolutionConfig
 from evolution.db import get_session
 from evolution.models import (
+    ConjugateAgent,
+    ConjugateAgentParticipation,
     EvolutionSkill,
     EvolutionSkillVersion,
     EvolutionRuntimeState,
@@ -30,6 +32,19 @@ ROLE_LABELS = {
     "guard": "守卫", "hunter": "猎人",
     "villager": "村民",
 }
+
+WIN_RESULTS = {"win", "won", "wins", "victory", "victorious", "胜", "胜利", "获胜", "赢"}
+LOSS_RESULTS = {"loss", "lost", "lose", "defeat", "defeated", "失败", "落败", "输"}
+
+
+def _normalize_game_result(result: Optional[str]) -> str:
+    """归一化历史归档里的胜负枚举，兼容主流程和旧数据。"""
+    value = str(result or "").strip().lower()
+    if value in WIN_RESULTS:
+        return "win"
+    if value in LOSS_RESULTS:
+        return "loss"
+    return value
 
 
 class EvolutionSummary:
@@ -308,34 +323,77 @@ class EvolutionSummary:
 
     # --- 7. 近期对局统计 ---
     def _agg_game_stats(self, since_dt: datetime) -> Dict:
-        """统计 since 以来的对局数及胜负分布。"""
+        """统计 since 以来各共轭进化体的参赛胜负。"""
         session = get_session()
         try:
             rows = (
-                session.query(EvolutionGameArchive)
-                .filter(EvolutionGameArchive.created_at >= since_dt)
+                session.query(ConjugateAgentParticipation, ConjugateAgent)
+                .join(ConjugateAgent, ConjugateAgentParticipation.conjugate_agent_id == ConjugateAgent.id)
+                .filter(ConjugateAgentParticipation.created_at >= since_dt)
+                .order_by(ConjugateAgentParticipation.created_at.asc())
                 .all()
             )
             total = len(rows)
-            win_count = sum(1 for g in rows if g.result == "win")
-            loss_count = sum(1 for g in rows if g.result == "loss")
 
-            by_role: Dict[str, Dict] = {}
-            for g in rows:
-                role = g.my_role or "unknown"
-                if role not in by_role:
-                    by_role[role] = {"total": 0, "win": 0, "loss": 0, "role_label": ROLE_LABELS.get(role, role)}
-                by_role[role]["total"] += 1
-                if g.result == "win":
-                    by_role[role]["win"] += 1
-                elif g.result == "loss":
-                    by_role[role]["loss"] += 1
+            by_agent: Dict[int, Dict] = {}
+            win_count = 0
+            loss_count = 0
+            for participation, agent in rows:
+                result = _normalize_game_result(participation.result)
+                if result == "win":
+                    win_count += 1
+                elif result == "loss":
+                    loss_count += 1
+
+                if agent.id not in by_agent:
+                    by_agent[agent.id] = {
+                        "agent_id": agent.id,
+                        "external_agent_id": f"agent:{agent.id}",
+                        "agent_name": agent.agent_name,
+                        "fingerprint": agent.fingerprint,
+                        "born_at": agent.born_at.isoformat() if agent.born_at else "",
+                        "total": 0,
+                        "win": 0,
+                        "loss": 0,
+                        "roles": {},
+                        "cumulative_total": agent.games_played,
+                        "cumulative_win": agent.wins,
+                        "cumulative_win_rate": float(agent.win_rate or 0.0),
+                    }
+
+                item = by_agent[agent.id]
+                item["total"] += 1
+                role = participation.role or "unknown"
+                role_label = ROLE_LABELS.get(role, role)
+                if role not in item["roles"]:
+                    item["roles"][role] = {
+                        "role": role,
+                        "role_label": role_label,
+                        "total": 0,
+                        "win": 0,
+                    }
+                item["roles"][role]["total"] += 1
+
+                if result == "win":
+                    item["win"] += 1
+                    item["roles"][role]["win"] += 1
+                elif result == "loss":
+                    item["loss"] += 1
+
+            agents = sorted(
+                by_agent.values(),
+                key=lambda item: (
+                    -(item["win"] / item["total"] if item["total"] else 0.0),
+                    -item["total"],
+                    item["agent_id"],
+                ),
+            )
 
             return {
                 "total": total,
                 "win": win_count,
                 "loss": loss_count,
-                "by_role": by_role,
+                "by_agent": agents,
             }
         finally:
             session.close()
@@ -615,23 +673,32 @@ class EvolutionSummary:
     def _format_game_stats(self, data: Dict) -> str:
         total = data.get("total", 0)
         if total == 0:
-            return "（本周期内无对局记录）"
+            return "（本周期内无进化体参赛记录）"
         win = data.get("win", 0)
         loss = data.get("loss", 0)
         lines = [
-            f"总对局数: {total}，胜: {win}，负: {loss}，"
-            f"总胜率: {win / total:.0%}"
+            f"进化体参赛场次: {total}，胜: {win}，负: {loss}，"
+            f"整体胜率: {win / total:.0%}"
         ]
-        by_role = data.get("by_role", {})
-        if by_role:
-            lines.append("各角色表现:")
-            for role, stats in by_role.items():
-                r_total = stats["total"]
-                r_win = stats["win"]
-                role_label = stats.get("role_label", role)
+        by_agent = data.get("by_agent", [])
+        if by_agent:
+            lines.append("各进化体表现:")
+            for agent in by_agent:
+                a_total = agent["total"]
+                a_win = agent["win"]
+                role_parts = []
+                for role_stats in agent.get("roles", {}).values():
+                    r_total = role_stats["total"]
+                    r_win = role_stats["win"]
+                    role_parts.append(
+                        f"{role_stats.get('role_label', role_stats['role'])}{r_total}局{r_win}胜"
+                    )
+                role_text = "；角色分布: " + "、".join(role_parts) if role_parts else ""
                 lines.append(
-                    f"  - {role_label}（{role}）: {r_total} 局，胜 {r_win}，"
-                    f"胜率 {r_win / r_total:.0%}" if r_total > 0 else f"  - {role_label}: 0 局"
+                    f"  - {agent['agent_name']}（agent:{agent['agent_id']}）: "
+                    f"{a_total} 场，胜 {a_win}，胜率 {a_win / a_total:.0%}，"
+                    f"累计胜率 {agent.get('cumulative_win_rate', 0.0):.0%}"
+                    f"{role_text}"
                 )
         return "\n".join(lines)
 
@@ -694,17 +761,20 @@ class EvolutionSummary:
         total = stats.get("total", 0)
         if total > 0:
             win = stats.get("win", 0)
-            parts.append(f"近期共完成 {total} 局对局，胜 {win} 局，总胜率 {win / total:.0%}。")
-            by_role = stats.get("by_role", {})
-            if by_role:
-                role_parts = []
-                for role, rs in by_role.items():
-                    if rs["total"] > 0:
-                        role_parts.append(f"{role}{rs['win'] / rs['total']:.0%}胜率")
-                if role_parts:
-                    parts.append(f"各角色表现：{'、'.join(role_parts)}。")
+            parts.append(f"近期共记录 {total} 次进化体参赛，胜 {win} 次，整体胜率 {win / total:.0%}。")
+            by_agent = stats.get("by_agent", [])
+            if by_agent:
+                agent_parts = []
+                for agent in by_agent:
+                    if agent["total"] > 0:
+                        agent_parts.append(
+                            f"{agent['agent_name']}（agent:{agent['agent_id']}）"
+                            f"{agent['win'] / agent['total']:.0%}胜率"
+                        )
+                if agent_parts:
+                    parts.append(f"各进化体表现：{'、'.join(agent_parts)}。")
         else:
-            parts.append("本周期内暂无对局记录。")
+            parts.append("本周期内暂无进化体参赛记录。")
 
         return "\n".join(parts)
 
