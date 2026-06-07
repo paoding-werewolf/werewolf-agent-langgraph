@@ -32,7 +32,14 @@ from evolution.conjugate_agent import (
     maybe_create_conjugate_agent,
 )
 from evolution.db import Base, engine, get_session
-from evolution.models import ConjugateAgent, EvolutionGameArchive, EvolutionSkill, EvolutionSkillVersion
+from evolution.models import (
+    ConjugateAgent,
+    ConjugateAgentParticipation,
+    EvolutionGameArchive,
+    EvolutionSkill,
+    EvolutionSkillVersion,
+)
+from evolution.summary import EvolutionSummary
 from main_ws import _build_versions_used, _get_prompt_history, _list_provider_agents, _process_game_over, _process_init, _run_global_evolution_pass, store
 from memory.game_archive import save_game
 from utils.prompt_logger import prompt_logger
@@ -49,7 +56,13 @@ def setup_function():
         store._sessions.clear()
     session = get_session()
     try:
-        for model in (EvolutionGameArchive, ConjugateAgent, EvolutionSkillVersion, EvolutionSkill):
+        for model in (
+            EvolutionGameArchive,
+            ConjugateAgentParticipation,
+            ConjugateAgent,
+            EvolutionSkillVersion,
+            EvolutionSkill,
+        ):
             session.query(model).delete()
         session.commit()
     finally:
@@ -827,6 +840,34 @@ def test_save_game_archives_versions_used():
         session.close()
 
 
+def test_summary_game_stats_uses_conjugate_participations():
+    _seed_initial_skills()
+    initial_id = _list_provider_agents()[1]["external_agent_id"]
+    promoted_id = _promote_wolf_logic()
+
+    from evolution.conjugate_agent import record_conjugate_participation
+
+    initial_agent_id = int(initial_id.split(":")[1])
+    record_conjugate_participation(promoted_id, "room-1", 1, "wolf", "won", True)
+    record_conjugate_participation(promoted_id, "room-2", 2, "seer", "lost", False)
+    record_conjugate_participation(initial_agent_id, "room-3", 3, "villager", "win", True)
+
+    summary = EvolutionSummary()
+    stats = summary._agg_game_stats(datetime(2000, 1, 1))
+
+    assert stats["total"] == 3
+    assert stats["win"] == 2
+    assert stats["loss"] == 1
+    assert [agent["agent_id"] for agent in stats["by_agent"]] == [initial_agent_id, promoted_id]
+
+    promoted_stats = next(agent for agent in stats["by_agent"] if agent["agent_id"] == promoted_id)
+    assert promoted_stats["total"] == 2
+    assert promoted_stats["win"] == 1
+    assert promoted_stats["roles"]["wolf"]["win"] == 1
+    assert promoted_stats["roles"]["seer"]["total"] == 1
+    assert "各进化体表现" in summary._format_game_stats(stats)
+
+
 def test_game_over_skips_evolution_for_historical_conjugate(monkeypatch):
     _seed_initial_skills()
     # 初始共轭 Agent ID（列表第二项）
@@ -867,6 +908,136 @@ def test_game_over_skips_evolution_for_historical_conjugate(monkeypatch):
     assert resp["skip_evolution"] is True
     assert resp["reason"] == "frozen_conjugate_agent"
     assert called is False
+
+
+def test_game_over_records_conjugate_participation_for_latest_alias(monkeypatch):
+    _seed_initial_skills()
+    _list_provider_agents()  # ensure initial conjugate agent exists
+    promoted_id = _promote_wolf_logic()
+
+    state = {
+        "external_agent_id": "latest:evolution",
+        "conjugate_agent_id": promoted_id,
+        "room_id": "room-1",
+        "my_role": "wolf",
+        "me_id": "1",
+        "events": [],
+        "players": {},
+        "versions_used": {},
+    }
+    store.create("session-stats", state)
+
+    async def fake_pipeline(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr("main_ws._run_post_game_pipeline", fake_pipeline)
+
+    asyncio.run(
+        _process_game_over(
+            "session-stats",
+            "req-1",
+            "won",
+            "wolf",
+            {},
+            False,
+            "room-1",
+            "wolf",
+        )
+    )
+
+    session = get_session()
+    try:
+        agent = session.get(ConjugateAgent, promoted_id)
+        assert agent.games_played == 1
+        assert agent.wins == 1
+        assert agent.win_rate == 1.0
+
+        participation = session.query(ConjugateAgentParticipation).filter_by(
+            room_id="room-1",
+            conjugate_agent_id=promoted_id,
+            seat_number=1,
+        ).first()
+        assert participation is not None
+        assert participation.role == "wolf"
+        assert participation.is_winner is True
+    finally:
+        session.close()
+
+
+def test_game_over_skip_evolution_still_records_conjugate_stats(monkeypatch):
+    _seed_initial_skills()
+    _list_provider_agents()
+    promoted_id = _promote_wolf_logic()
+
+    state = {
+        "external_agent_id": "latest:evolution",
+        "conjugate_agent_id": promoted_id,
+        "room_id": "room-skip",
+        "my_role": "seer",
+        "me_id": "2",
+        "events": [],
+        "players": {},
+        "versions_used": {},
+    }
+    store.create("session-skip", state)
+
+    called = False
+
+    async def fake_pipeline(*args, **kwargs):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr("main_ws._run_post_game_pipeline", fake_pipeline)
+
+    resp = asyncio.run(
+        _process_game_over(
+            "session-skip",
+            "req-1",
+            "lost",
+            "wolf",
+            {},
+            True,
+            "room-skip",
+            "seer",
+        )
+    )
+
+    assert resp["skip_evolution"] is True
+    assert called is False
+
+    session = get_session()
+    try:
+        agent = session.get(ConjugateAgent, promoted_id)
+        assert agent.games_played == 1
+        assert agent.wins == 0
+        assert agent.win_rate == 0.0
+    finally:
+        session.close()
+
+
+def test_conjugate_participation_is_idempotent_by_room_agent_seat():
+    _seed_initial_skills()
+    _list_provider_agents()
+    promoted_id = _promote_wolf_logic()
+
+    from evolution.conjugate_agent import record_conjugate_participation
+
+    assert record_conjugate_participation(promoted_id, "room-repeat", 1, "wolf", "won", True)
+    assert record_conjugate_participation(promoted_id, "room-repeat", 1, "wolf", "won", True)
+
+    session = get_session()
+    try:
+        agent = session.get(ConjugateAgent, promoted_id)
+        assert agent.games_played == 1
+        assert agent.wins == 1
+        assert agent.win_rate == 1.0
+        assert session.query(ConjugateAgentParticipation).filter_by(
+            room_id="room-repeat",
+            conjugate_agent_id=promoted_id,
+            seat_number=1,
+        ).count() == 1
+    finally:
+        session.close()
 
 
 def test_list_provider_agents_exposes_latest_evolution_fixed_id():
