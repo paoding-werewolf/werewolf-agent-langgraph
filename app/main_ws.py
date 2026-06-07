@@ -1245,24 +1245,79 @@ async def _evo_games(request):
     try:
         from evolution.db import get_session
         from evolution.models import EvolutionGameArchive
-        from sqlalchemy import desc
+        from sqlalchemy import desc, text
         limit = int(request.query.get("limit", "20"))
         session = get_session()
         try:
             rows = session.query(EvolutionGameArchive).order_by(
                 desc(EvolutionGameArchive.created_at)
             ).limit(limit).all()
+
+            # 批量从 games 表补充元数据（players_count, round_count, duration_seconds, winner）
+            game_ids = [row.game_id for row in rows]
+            games_meta = {}
+            if game_ids:
+                try:
+                    result = session.execute(
+                        text("SELECT room_id, round_count, duration_seconds, players_json, events_json FROM games WHERE room_id IN :ids"),
+                        {"ids": tuple(game_ids)},
+                    )
+                    for r in result:
+                        meta = {
+                            "round_count": r[1],
+                            "duration_seconds": r[2],
+                            "players_count": 0,
+                            "players": [],
+                            "winner": None,
+                        }
+                        try:
+                            players = r[3] or []
+                            meta["players_count"] = len(players)
+                            meta["players"] = [
+                                {
+                                    "id": p.get("id", ""),
+                                    "name": (p.get("agent") or {}).get("name", p.get("label", "")),
+                                    "role": p.get("role", ""),
+                                    "agent_id": (p.get("agent") or {}).get("id"),
+                                    "agent_name": (p.get("agent") or {}).get("name"),
+                                    "is_alive": None,
+                                }
+                                for p in players
+                            ]
+                        except Exception:
+                            pass
+                        try:
+                            events = r[4] or {}
+                            timeline = events.get("timeline", []) if isinstance(events, dict) else []
+                            alive_map = {}
+                            for evt in timeline:
+                                if isinstance(evt, dict) and evt.get("type") == "game_over":
+                                    meta["winner"] = (evt.get("state_after") or {}).get("winner")
+                                    alive_info = ((evt.get("state_after") or {}).get("players") or {})
+                                    for sid, sinfo in alive_info.items():
+                                        alive_map[str(sid)] = sinfo.get("alive", None)
+                                    break
+                            if alive_map:
+                                for p in meta["players"]:
+                                    p["is_alive"] = alive_map.get(str(p["id"]), None)
+                        except Exception:
+                            pass
+                        games_meta[r[0]] = meta
+                except Exception:
+                    pass
+
             result = []
             for row in rows:
                 payload = row.payload_json or {}
+                meta = games_meta.get(row.game_id, {})
                 result.append({
                     "game_id": row.game_id,
-                    "winner": payload.get("winner"),
-                    "round_count": payload.get("round_count", row.day_count),
-                    "players_count": payload.get("players_count", len(payload.get("players") or [])),
-                    "duration_seconds": payload.get("duration_seconds", 0),
+                    "winner": meta.get("winner") or payload.get("winner"),
+                    "round_count": meta.get("round_count") or payload.get("round_count") or row.day_count,
+                    "players_count": meta.get("players_count") or payload.get("players_count", len(payload.get("players") or [])),
+                    "duration_seconds": meta.get("duration_seconds") or payload.get("duration_seconds", 0),
                     "created_at": row.created_at.isoformat() if row.created_at else None,
-                    "players": payload.get("players") or [],
+                    "players": meta.get("players") or payload.get("players") or [],
                     "has_builtin_ai": row.has_builtin_ai,
                 })
             return aiohttp_web.json_response(result)
