@@ -13,12 +13,12 @@ from core.game_state import AgentGameState, PlayerPerception
 def build_minimal_state():
     """Build a minimal game state for testing."""
     players = {
-        "1": PlayerPerception(id="1", role=Role.VILLAGER, is_alive=True),
-        "2": PlayerPerception(id="2", role=Role.WOLF, is_alive=True),
-        "3": PlayerPerception(id="3", role=Role.SEER, is_alive=True),
-        "4": PlayerPerception(id="4", role=Role.VILLAGER, is_alive=True),
-        "5": PlayerPerception(id="5", role=Role.WITCH, is_alive=True),
-        "6": PlayerPerception(id="6", role=Role.VILLAGER, is_alive=True),
+        "1": PlayerPerception(id="1", name="玩家1", role=Role.VILLAGER, is_alive=True),
+        "2": PlayerPerception(id="2", name="玩家2", role=Role.WOLF, is_alive=True),
+        "3": PlayerPerception(id="3", name="玩家3", role=Role.SEER, is_alive=False),
+        "4": PlayerPerception(id="4", name="玩家4", role=Role.VILLAGER, is_alive=True),
+        "5": PlayerPerception(id="5", name="玩家5", role=Role.WITCH, is_alive=True),
+        "6": PlayerPerception(id="6", name="玩家6", role=Role.VILLAGER, is_alive=True),
     }
     events = [
         {"status": "start_game", "round": 1, "content": "游戏开始"},
@@ -26,6 +26,9 @@ def build_minimal_state():
         {"status": "discussion", "round": 2, "content": "4号发言：我觉得2号发言有问题，首夜信息少但2号的表态太刻意。5号发言：我同意，2号一直在带节奏。2号发言：我只是积极分析，你们这是找扛推。"},
     ]
     return AgentGameState(
+        room_id="test_room",
+        me_id="1",
+        my_role=Role.VILLAGER,
         day=2,
         phase="discussion",
         players=players,
