@@ -10,14 +10,17 @@ EVENT_STATUS_MAP = {
     "night": "night_begin",
     "night_info": "dawn_report",
     "death_notice": "death_settlement",
+    "last_words": "last_words",
     "wolf_chat": "wolf_chat",
     "discuss": "discussion",
     "sheriff_election": "sheriff_election_signup",
     "sheriff_speech": "sheriff_election_speech",
     "sheriff_vote": "sheriff_election_vote",
+    "sheriff_pk_vote_result": "sheriff_pk_vote_result",
     "sheriff_speech_order": "sheriff_choose",
     "sheriff_pk": "sheriff_pk_speech",
     "sheriff": "sheriff_election_result",
+    "sheriff_transfer": "sheriff_transfer",
     "hunter": "shoot_begin",
     "shoot_reminder": "shoot_reminder",
     "result": "game_over",
@@ -57,10 +60,17 @@ def normalize_status(status: Any, *, mode: str = "event") -> str:
 
 def normalize_action_status(status: Any, *, message: Any = "", previous_phase: Any = "") -> str:
     value = str(status or "")
+    text = str(message or "").lower()
+
+    if value in {"last_words", "last_words_action"}:
+        return "last_words"
+
+    if value == "discuss" and ("遗言" in text or "last word" in text):
+        return "last_words"
+
     if value != "skill":
         return normalize_status(value, mode="action")
 
-    text = str(message or "").lower()
     for phase, tokens in SKILL_MESSAGE_MAP:
         if any(token in text for token in tokens):
             return phase
@@ -95,4 +105,8 @@ def normalize_event_status(status: Any, traces: Iterable[dict] | None = None, *,
         for phase, tokens in SKILL_MESSAGE_MAP:
             if any(token in text for token in tokens):
                 return phase
+
+    if value == "sheriff":
+        if actions & {"sheriff_transfer", "sheriff_destroy"}:
+            return "sheriff_transfer"
     return normalize_status(value, mode="event")

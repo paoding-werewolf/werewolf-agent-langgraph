@@ -46,6 +46,7 @@ def make_initial_state(agent_id: str) -> AgentState:
             "id": pid,
             "name": f"Player {pid}",
             "role": role_val if pid == player_id else None,
+            "is_alive": True,
         }
 
     return {

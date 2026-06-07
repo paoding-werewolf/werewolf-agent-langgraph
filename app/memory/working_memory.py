@@ -40,17 +40,17 @@ class WorkingMemory:
             if content:
                 self.known_info.append(f"R{round_num}: {content}")
 
-        elif status == "discussion":
+        elif status in ("discussion", "last_words"):
             self.speeches.setdefault(day_key, {})
             self.speeches[day_key]["summary"] = content
 
-        elif status == "vote" or status == "vote_result":
+        elif status in ("vote", "vote_result", "sheriff_election_vote", "sheriff_pk_vote_result"):
             self.actions.append(f"{day_key}_vote: {content}")
 
-        elif status == "death_notice":
+        elif status in ("dawn_report", "shoot_begin"):
             self.actions.append(f"{day_key}_death: {content}")
 
-        elif status == "sheriff":
+        elif status in ("sheriff_election_result", "sheriff_transfer"):
             self.actions.append(f"sheriff: {content}")
 
     def add_my_speech(self, day: int, text: str):

@@ -41,6 +41,7 @@ class PromptBuilder:
         "sheriff_election_vote": "警长投票",
         "sheriff_election_result": "警长结果公布",
         "sheriff_pk_speech": "警长 PK 发言",
+        "sheriff_pk_vote_result": "警长 PK 投票结果",
         "sheriff_choose": "警长选择发言顺序",
         "discussion": "白天发言",
         "vote": "放逐投票",
@@ -219,18 +220,7 @@ This is a thinking framework for the villager role during daytime discussion, fo
         return "\n".join(lines) if lines else "- 暂无可展示的公开事件"
 
     def _get_alive_player_ids(self, state: AgentGameState) -> list[str]:
-        dead_player_ids = set()
-        for event in state.events:
-            if event.get("status") != "death_settlement":
-                continue
-            for player_id in self._extract_player_ids(event.get("content", "")):
-                dead_player_ids.add(player_id)
-        return [player_id for player_id in state.players.keys() if player_id not in dead_player_ids]
-
-    def _extract_player_ids(self, text: str) -> list[str]:
-        import re
-
-        return re.findall(r"\d+", text or "")
+        return [player_id for player_id, player in state.players.items() if player.is_alive]
 
     def _phase_group(self, phase: str) -> str:
         if phase in {
@@ -239,9 +229,10 @@ This is a thinking framework for the villager role during daytime discussion, fo
             "sheriff_election_vote",
             "sheriff_election_result",
             "sheriff_pk_speech",
+            "sheriff_pk_vote_result",
         }:
             return "election"
-        if phase in {"discussion", "sheriff_choose"}:
+        if phase in {"discussion", "sheriff_choose", "last_words"}:
             return "discussion"
         return phase or "unknown"
 

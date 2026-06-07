@@ -7,6 +7,8 @@ from agents.llm_caller import llm
 from agents.prompt_builder import PromptBuilder
 from agents.protocol import normalize_action_status, normalize_event_status
 
+DEATH_TRACE_ACTIONS = {"death", "vote_eliminate", "shoot_skill"}
+
 
 def _get_evolution_strategies(state: AgentState) -> str:
     """从 state 读取 versions_used，按指定版本加载策略全文。"""
@@ -28,15 +30,54 @@ PRIVATE_NIGHT_ACTIONS = {
 }
 WOLF_TEAM_PHASES = {"wolf_kill"}
 WOLF_CHAT_PHASES = {"wolf_chat"}
-DISCUSSION_PHASES = {"discussion", "sheriff_election_speech", "sheriff_pk_speech"}
+DISCUSSION_PHASES = {"discussion", "sheriff_election_speech", "sheriff_pk_speech", "last_words"}
 ELECTION_PHASES = {
     "sheriff_election_signup",
     "sheriff_election_vote_begin",
     "sheriff_election_vote",
     "sheriff_election_result",
+    "sheriff_pk_vote_result",
 }
 VOTE_PHASES = {"vote"}
 SHOOT_PHASES = {"dawn_report", "shoot_skill"}
+
+
+def _dead_player_ids_from_event(event: dict) -> set[str]:
+    """根据已归一化事件 traces 推导本事件公开确认的死亡玩家。"""
+    status = event.get("status", "")
+    traces = event.get("traces") or []
+    dead_ids: set[str] = set()
+
+    if status in {"dawn_report", "death_settlement", "shoot_begin"}:
+        for trace in traces:
+            if trace.get("action") in DEATH_TRACE_ACTIONS and trace.get("to"):
+                dead_ids.add(str(trace["to"]))
+
+    elif status == "vote_result":
+        for trace in traces:
+            if trace.get("action") == "vote_eliminate" and trace.get("from") is None and trace.get("to"):
+                dead_ids.add(str(trace["to"]))
+
+    elif status == "shoot_skill":
+        for trace in traces:
+            if trace.get("action") == "shoot_skill" and trace.get("to"):
+                dead_ids.add(str(trace["to"]))
+
+    return dead_ids
+
+
+def _update_working_memory(wm_data: dict | None, event: dict) -> dict | None:
+    if not wm_data:
+        return wm_data
+
+    from memory.working_memory import WorkingMemory
+
+    wm = WorkingMemory.from_dict(wm_data)
+    wm.day = event.get("round", wm.day)
+    wm.update_from_event(event)
+    wm.compress_old_entries()
+    return wm.to_dict()
+
 
 def _parse_event(state: AgentState) -> AgentState:
     """将传入的 ActRequest 作为游戏事件处理，更新状态。"""
@@ -63,6 +104,8 @@ def _parse_event(state: AgentState) -> AgentState:
     events.append(event)
 
     players = {pid: dict(pdata) for pid, pdata in state["players"].items()}
+    for pdata in players.values():
+        pdata.setdefault("is_alive", True)
     state_sheriff = state.get("sheriff")
 
     my_role = Role(state["my_role"])
@@ -92,6 +135,14 @@ def _parse_event(state: AgentState) -> AgentState:
             players[trace_to]["role"] = "wolf"
         elif action == "seer_good" and trace_to in players:
             players[trace_to]["role"] = "villager"
+        elif action == "sheriff_transfer" and trace_to in players:
+            state_sheriff = trace_to
+        elif action == "sheriff_destroy":
+            state_sheriff = None
+
+    for dead_id in _dead_player_ids_from_event(event):
+        if dead_id in players:
+            players[dead_id]["is_alive"] = False
 
     return {
         **state,
@@ -101,6 +152,7 @@ def _parse_event(state: AgentState) -> AgentState:
         "players": players,
         "events": events,
         "sheriff": _extract_sheriff_from_events(events, state_sheriff),
+        "working_memory": _update_working_memory(state.get("working_memory"), event),
     }
 
 
@@ -442,12 +494,6 @@ def _to_agent_game_state(state: AgentState):
     """将字典类型的 AgentState 转换为 PromptBuilder 兼容的 AgentGameState 数据类。"""
     from core.game_state import AgentGameState, PlayerPerception
 
-    dead_player_ids = set()
-    for event in state.get("events", []):
-        if event.get("status") != "death_settlement":
-            continue
-        dead_player_ids.update(re.findall(r"\d+", event.get("content", "")))
-
     players = {}
     for pid, pdata in state["players"].items():
         role_val = pdata.get("role")
@@ -455,6 +501,8 @@ def _to_agent_game_state(state: AgentState):
             id=pdata.get("id", pid),
             name=pdata.get("name", f"玩家 {pid}"),
             role=Role(role_val) if role_val else None,
+            is_alive=pdata.get("is_alive", True),
+            is_sheriff=(pid == state.get("sheriff")),
             notes=pdata.get("notes", ""),
         )
 
