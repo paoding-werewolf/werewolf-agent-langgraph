@@ -102,27 +102,40 @@ class SuggestionClusterer:
         return {"action": "new_cluster", "cluster_id": cluster_id}
 
     def _scene_tag_overlap(self, tags_a: Dict, tags_b: Dict) -> float:
-        """计算两组场景标签的相似度（0-1）。"""
-        key_fields = ["role", "role_survived_rounds", "critical_phase",
-                       "wolf_aggression", "result", "sheriff_contested",
-                       "first_night_target"]
-        match_count = 0
-        total = len(key_fields)
+        """计算两组场景标签的相似度（0-1），核心维度加权优先。
 
-        for field_name in key_fields:
+        核心维度（role, critical_phase, result）各占 0.25，合计 0.75；
+        次要维度（其余 4 个）各占 0.0625，合计 0.25。
+        同 role + 同 phase + 同 result 即可达到 0.75，轻松过阈值。
+        """
+        core_fields = ["role", "critical_phase", "result"]
+        secondary_fields = ["role_survived_rounds", "wolf_aggression",
+                            "sheriff_contested", "first_night_target"]
+
+        score = 0.0
+
+        # 核心维度：精确匹配各 0.25
+        for field_name in core_fields:
+            val_a = tags_a.get(field_name)
+            val_b = tags_b.get(field_name)
+            if val_a is not None and val_b is not None and str(val_a) == str(val_b):
+                score += 0.25
+
+        # 次要维度：精确匹配各 0.0625，数值近邻半分
+        for field_name in secondary_fields:
             val_a = tags_a.get(field_name)
             val_b = tags_b.get(field_name)
             if val_a is not None and val_b is not None:
                 if str(val_a) == str(val_b):
-                    match_count += 1
+                    score += 0.0625
                 elif field_name == "role_survived_rounds":
                     try:
                         if abs(int(val_a) - int(val_b)) <= 1:
-                            match_count += 0.5
+                            score += 0.03125
                     except (ValueError, TypeError):
                         pass
 
-        return match_count / total if total > 0 else 0
+        return min(score, 1.0)
 
     def _check_semantic_consistency(self, new_suggestion: Dict, cluster: Dict) -> bool:
         """用 LLM 判断新建议与 cluster 内已有建议是否语义一致。"""
