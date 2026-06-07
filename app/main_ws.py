@@ -1183,8 +1183,245 @@ def _create_http_app():
     app.router.add_post("/evolution/summary/generate", _evo_summary_generate)
     app.router.add_get("/evolution/summary/latest", _evo_summary_latest)
     app.router.add_get("/evolution/logs", _evo_logs)
+    app.router.add_get("/evolution/insights", _evo_insights)
+    app.router.add_get("/evolution/trends", _evo_trends)
 
     return app
+
+
+# ── Evolution Insights & Trends ────────────────────────────
+
+async def _evo_insights(request):
+    try:
+        from evolution.db import get_session
+        from evolution.models import (
+            EvolutionSkill, EvolutionSkillVersion, EvolutionGameArchive,
+            EvolutionRuntimeState, EvolutionBufferItem,
+        )
+        from sqlalchemy import func
+        import json
+
+        session = get_session()
+        try:
+            # ── summary stats ──
+            total_games = session.query(func.count(EvolutionGameArchive.id)).scalar() or 0
+            total_strategies = session.query(func.count(EvolutionSkill.id)).scalar() or 0
+
+            # promotion count = superseded versions
+            promotion_count = session.query(func.count(EvolutionSkillVersion.id)).filter(
+                EvolutionSkillVersion.status == "superseded"
+            ).scalar() or 0
+
+            # confirmed items stats
+            confirmed_row = session.query(
+                func.count(EvolutionBufferItem.id),
+                func.avg(EvolutionBufferItem.avg_causal_strength),
+                func.avg(EvolutionBufferItem.consistency_rate),
+            ).filter(EvolutionBufferItem.item_type == "confirmed").first()
+            confirmed_items = confirmed_row[0] or 0
+            avg_causal = round(float(confirmed_row[1] or 0), 4)
+            avg_consistency = round(float(confirmed_row[2] or 0), 4)
+
+            # overall win rate
+            win_count = session.query(func.count(EvolutionGameArchive.id)).filter(
+                EvolutionGameArchive.result.in_(["won", "good_won"])
+            ).scalar() or 0
+            latest_win_rate = round(win_count / total_games, 4) if total_games > 0 else 0.0
+
+            # camp win rates
+            good_wins = session.query(func.count(EvolutionGameArchive.id)).filter(
+                EvolutionGameArchive.result == "good_won"
+            ).scalar() or 0
+            wolf_wins = session.query(func.count(EvolutionGameArchive.id)).filter(
+                EvolutionGameArchive.result == "wolf_won"
+            ).scalar() or 0
+            good_total = good_wins + session.query(func.count(EvolutionGameArchive.id)).filter(
+                EvolutionGameArchive.result == "wolf_won"
+            ).scalar() or 0
+            good_win_rate = round(good_wins / good_total, 4) if good_total > 0 else 0.0
+            wolf_win_rate = round(wolf_wins / good_total, 4) if good_total > 0 else 0.0
+
+            summary = {
+                "total_games": total_games,
+                "total_strategies": total_strategies,
+                "promotion_count": promotion_count,
+                "confirmed_items": confirmed_items,
+                "avg_causal_strength": avg_causal,
+                "avg_consistency": avg_consistency,
+                "latest_win_rate": latest_win_rate,
+                "good_win_rate": good_win_rate,
+                "wolf_win_rate": wolf_win_rate,
+            }
+
+            # ── gepa state ──
+            gepa_data = None
+            gepa_record = session.get(EvolutionRuntimeState, "gepa")
+            if gepa_record:
+                pj = gepa_record.payload_json or {}
+                g = json.loads(pj) if isinstance(pj, str) else pj
+                hist = g.get("history", [])
+                gepa_data = {
+                    "status": g.get("status", "idle"),
+                    "total_generations": g.get("total_generations", 0),
+                    "last_fitness": hist[-1].get("best_fitness", {}) if hist else {},
+                    "generations": [
+                        {
+                            "generation": h.get("generation"),
+                            "pareto_front_size": h.get("pareto_front_size"),
+                            "new_versions_created": h.get("new_versions_created", []),
+                            "best_fitness": h.get("best_fitness", {}),
+                            "mutations": h.get("mutations", 0),
+                            "crossovers": h.get("crossovers", 0),
+                        }
+                        for h in hist
+                    ],
+                }
+
+            # ── promotion events ──
+            sup_rows = session.query(EvolutionSkillVersion).filter(
+                EvolutionSkillVersion.status == "superseded"
+            ).order_by(EvolutionSkillVersion.updated_at.desc()).limit(20).all()
+
+            promotions = []
+            for sv in sup_rows:
+                skill = session.get(EvolutionSkill, sv.skill_id)
+                skill_name = skill.skill_name if skill else "unknown"
+                promotions.append({
+                    "skill_name": skill_name,
+                    "version": sv.version,
+                    "win_rate": round(sv.win_rate or 0, 4),
+                    "games_played": sv.games_played or 0,
+                    "promoted_at": sv.updated_at.isoformat() if sv.updated_at else None,
+                })
+
+            # ── role diversity ──
+            role_rows = session.query(
+                EvolutionSkill.role,
+                func.count(EvolutionSkill.id),
+            ).group_by(EvolutionSkill.role).all()
+            role_diversity = {r[0] or "unknown": r[1] for r in role_rows}
+
+            # ── camp win rates for frontend ──
+            camp_win_rates = [
+                {"camp": "good", "win_rate": good_win_rate},
+                {"camp": "wolf", "win_rate": wolf_win_rate},
+            ]
+
+        finally:
+            session.close()
+
+        return aiohttp_web.json_response({
+            "summary": summary,
+            "gepa": gepa_data,
+            "promotions": promotions,
+            "role_diversity": role_diversity,
+            "camp_win_rates": camp_win_rates,
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return aiohttp_web.json_response({"detail": str(e)}, status=500)
+
+
+async def _evo_trends(request):
+    try:
+        from evolution.db import get_session
+        from evolution.models import EvolutionGameArchive, EvolutionBufferItem
+        from sqlalchemy import func
+        import json
+
+        metric = request.query.get("metric", "win_rate")
+
+        session = get_session()
+        try:
+            points = []
+            version_markers = []
+
+            if metric == "win_rate":
+                # daily win rate from game archives
+                from sqlalchemy import case
+                rows = session.query(
+                    func.date(EvolutionGameArchive.created_at).label("dt"),
+                    func.count(EvolutionGameArchive.id).label("total"),
+                    func.sum(
+                        case(
+                            (EvolutionGameArchive.result.in_(["won", "good_won"]), 1),
+                            else_=0,
+                        )
+                    ).label("wins"),
+                ).group_by(func.date(EvolutionGameArchive.created_at)).order_by(
+                    func.date(EvolutionGameArchive.created_at)
+                ).all()
+                for r in rows:
+                    if r.total > 0:
+                        points.append({
+                            "x": str(r.dt),
+                            "value": round(float(r.wins) / r.total, 4),
+                        })
+
+            elif metric == "causal_strength":
+                # daily avg causal strength from confirmed items
+                rows = session.query(
+                    func.date(EvolutionBufferItem.updated_at).label("dt"),
+                    func.avg(EvolutionBufferItem.avg_causal_strength).label("avg_c"),
+                    func.count(EvolutionBufferItem.id).label("cnt"),
+                ).filter(
+                    EvolutionBufferItem.item_type == "confirmed"
+                ).group_by(func.date(EvolutionBufferItem.updated_at)).order_by(
+                    func.date(EvolutionBufferItem.updated_at)
+                ).all()
+                for r in rows:
+                    if r.avg_c is not None:
+                        points.append({
+                            "x": str(r.dt),
+                            "value": round(float(r.avg_c), 4),
+                        })
+
+            elif metric == "diversity":
+                # daily count of distinct skills with confirmed items (proxy for diversity)
+                from evolution.models import EvolutionSkill
+                rows = session.query(
+                    func.date(EvolutionBufferItem.updated_at).label("dt"),
+                    func.count(func.distinct(EvolutionBufferItem.target_skill_name)).label("cnt"),
+                ).filter(
+                    EvolutionBufferItem.item_type == "confirmed"
+                ).group_by(func.date(EvolutionBufferItem.updated_at)).order_by(
+                    func.date(EvolutionBufferItem.updated_at)
+                ).all()
+                for r in rows:
+                    points.append({
+                        "x": str(r.dt),
+                        "value": r.cnt,
+                    })
+
+            # version markers: promotion events on timeline
+            if metric == "win_rate":
+                from evolution.models import EvolutionSkillVersion, EvolutionSkill
+                promo_rows = session.query(EvolutionSkillVersion).filter(
+                    EvolutionSkillVersion.status == "superseded"
+                ).order_by(EvolutionSkillVersion.updated_at).all()
+                for sv in promo_rows:
+                    if sv.updated_at:
+                        skill = session.get(EvolutionSkill, sv.skill_id)
+                        label = f"{skill.skill_name}:{sv.version}" if skill else sv.version
+                        version_markers.append({
+                            "x": str(sv.updated_at.date()),
+                            "version": sv.version,
+                            "label": label,
+                        })
+
+        finally:
+            session.close()
+
+        return aiohttp_web.json_response({
+            "metric": metric,
+            "points": points,
+            "versions": version_markers,
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return aiohttp_web.json_response({"detail": str(e)}, status=500)
 
 
 # ── buffer_status 处理 ────────────────────────────────────
