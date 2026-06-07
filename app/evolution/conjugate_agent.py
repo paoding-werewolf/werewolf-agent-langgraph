@@ -15,10 +15,15 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
-from sqlalchemy import desc
+from sqlalchemy import case, desc, update
 
 from evolution.db import get_session
-from evolution.models import ConjugateAgent, EvolutionSkill, EvolutionSkillVersion
+from evolution.models import (
+    ConjugateAgent,
+    ConjugateAgentParticipation,
+    EvolutionSkill,
+    EvolutionSkillVersion,
+)
 
 logger = logging.getLogger("evolution.conjugate_agent")
 
@@ -98,6 +103,22 @@ def parse_conjugate_agent_id(external_agent_id: str | None) -> int | None:
         return None
 
 
+def resolve_conjugate_agent_id(external_agent_id: str | None) -> int | None:
+    """把外部 Agent ID 解析成本局实际参与统计的共轭快照 ID。"""
+    session = get_session()
+    try:
+        if not external_agent_id or str(external_agent_id) in ("default:common", "latest:evolution"):
+            latest = get_latest_conjugate_agent(session)
+            return latest.id if latest else None
+
+        agent_id = parse_conjugate_agent_id(external_agent_id)
+        if agent_id is None:
+            return None
+        return agent_id if session.get(ConjugateAgent, agent_id) else None
+    finally:
+        session.close()
+
+
 def is_latest_conjugate(external_agent_id: str | None) -> bool:
     """判断本次对局是否属于可进化的 Default Agent。"""
     if not external_agent_id or external_agent_id in ("default:common", "latest:evolution"):
@@ -108,6 +129,83 @@ def is_latest_conjugate(external_agent_id: str | None) -> bool:
         latest = get_latest_conjugate_agent(session)
         agent_id = parse_conjugate_agent_id(external_agent_id)
         return latest is not None and agent_id == latest.id
+    finally:
+        session.close()
+
+
+def record_conjugate_participation(
+    conjugate_agent_id: int | None,
+    room_id: str,
+    seat_number: str | int,
+    role: str,
+    result: str,
+    won: bool,
+) -> bool:
+    """按 seat 记录共轭进化体参赛结果，并维护进化体累计胜率。"""
+    if not conjugate_agent_id or not room_id:
+        return False
+
+    try:
+        seat = int(seat_number)
+    except (TypeError, ValueError):
+        return False
+
+    session = get_session()
+    try:
+        agent = session.get(ConjugateAgent, conjugate_agent_id)
+        if not agent:
+            return False
+
+        existing = (
+            session.query(ConjugateAgentParticipation)
+            .filter_by(
+                room_id=room_id,
+                conjugate_agent_id=conjugate_agent_id,
+                seat_number=seat,
+            )
+            .first()
+        )
+        if existing:
+            game_delta = 0
+            win_delta = int(bool(won)) - int(bool(existing.is_winner))
+            existing.role = role or existing.role
+            existing.result = result
+            existing.is_winner = bool(won)
+            existing.updated_at = _utc_now()
+        else:
+            game_delta = 1
+            win_delta = 1 if won else 0
+            session.add(ConjugateAgentParticipation(
+                room_id=room_id,
+                conjugate_agent_id=conjugate_agent_id,
+                seat_number=seat,
+                role=role or "",
+                result=result,
+                is_winner=bool(won),
+            ))
+
+        session.flush()
+        if game_delta or win_delta:
+            new_games = ConjugateAgent.games_played + game_delta
+            new_wins = ConjugateAgent.wins + win_delta
+            session.execute(
+                update(ConjugateAgent)
+                .where(ConjugateAgent.id == conjugate_agent_id)
+                .values(
+                    games_played=new_games,
+                    wins=new_wins,
+                    win_rate=case(
+                        (new_games > 0, (new_wins * 1.0) / new_games),
+                        else_=0.0,
+                    ),
+                    updated_at=_utc_now(),
+                )
+            )
+        session.commit()
+        return True
+    except Exception:
+        session.rollback()
+        raise
     finally:
         session.close()
 

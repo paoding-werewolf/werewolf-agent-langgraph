@@ -221,6 +221,9 @@ def _list_provider_agents() -> list[dict]:
             "lineage_serial": latest_lineage_serial,
             "skill_versions": latest_agent.skill_versions_json or {} if latest_agent else {},
             "skill_count": len(latest_agent.skill_versions_json or {}) if latest_agent else 0,
+            "games_played": latest_agent.games_played if latest_agent else 0,
+            "wins": latest_agent.wins if latest_agent else 0,
+            "win_rate": float(latest_agent.win_rate or 0.0) if latest_agent else 0.0,
             "changelog": latest_agent.changelog if latest_agent else "",
             "lore": latest_agent.lore if latest_agent else "",
         },
@@ -250,6 +253,9 @@ def _list_provider_agents() -> list[dict]:
                 "is_latest": agent.id == latest_id,
                 "skill_versions": agent.skill_versions_json or {},
                 "skill_count": len(agent.skill_versions_json or {}),
+                "games_played": agent.games_played,
+                "wins": agent.wins,
+                "win_rate": float(agent.win_rate or 0.0),
                 "changelog": agent.changelog,
                 "lore": agent.lore,
             },
@@ -280,6 +286,16 @@ async def _process_init(agent_id: str, role: str, teammates: list,
     initial["my_role"] = role
     initial["session_id"] = session_id
     initial["external_agent_id"] = external_agent_id or ""
+    try:
+        from evolution.conjugate_agent import resolve_conjugate_agent_id
+        initial["conjugate_agent_id"] = resolve_conjugate_agent_id(external_agent_id)
+    except Exception:
+        logger.exception(
+            "Failed to resolve conjugate agent during init: agent_id=%s external_agent_id=%s",
+            agent_id,
+            external_agent_id,
+        )
+        initial["conjugate_agent_id"] = None
     context = game_context if isinstance(game_context, dict) else {}
     initial["personality_prompt"] = str(context.get("personality") or "").strip()
     room_id = str(context.get("room_id") or "").strip()
@@ -748,18 +764,35 @@ async def _process_game_over(session_id: str, req_id: str,
         _save_minimal_archive(room_id or session_id, result, winner_role, all_roles, my_role)
         return {"type": "game_over_ack", "req_id": req_id, "session_not_found": True}
 
-    if skip_evolution:
-        logger.info(f"Session {session_id}: skip_evolution=True (builtin AI in game), skipping post-game pipeline.")
-        return {"type": "game_over_ack", "req_id": req_id, "skip_evolution": True}
-
     state["room_id"] = room_id
+    resolved_room_id = room_id or state.get("room_id") or session_id
+
+    try:
+        from evolution.summary import _normalize_game_result
+        from evolution.conjugate_agent import record_conjugate_participation, resolve_conjugate_agent_id
+
+        conjugate_agent_id = state.get("conjugate_agent_id")
+        if not conjugate_agent_id:
+            conjugate_agent_id = resolve_conjugate_agent_id(state.get("external_agent_id", ""))
+            state["conjugate_agent_id"] = conjugate_agent_id
+        won = _normalize_game_result(result) == "win"
+        record_conjugate_participation(
+            conjugate_agent_id,
+            resolved_room_id,
+            state.get("me_id", ""),
+            state.get("my_role", my_role or ""),
+            result,
+            won,
+        )
+    except Exception:
+        logger.exception(f"Failed to record conjugate participation for room={resolved_room_id}")
 
     # 立即写入对局归档（基本信息），不等 LLM 反思；pipeline 结束后 upsert 完整数据
     # 此步骤在 frozen conjugate 判定之前，确保所有对局都有归档记录
     try:
         from memory.game_archive import save_game as _save_game_immediate
         _save_game_immediate(
-            game_id=room_id or session_id,
+            game_id=resolved_room_id,
             my_role=state["my_role"],
             result=result,
             day_count=state.get("day", 1),
@@ -772,6 +805,10 @@ async def _process_game_over(session_id: str, req_id: str,
         logger.info(f"Immediate game archive saved: room={room_id}, role={state['my_role']}, result={result}")
     except Exception:
         logger.exception(f"Failed to save immediate game archive for room={room_id}")
+
+    if skip_evolution:
+        logger.info(f"Session {session_id}: skip_evolution=True (builtin AI in game), skipping post-game pipeline.")
+        return {"type": "game_over_ack", "req_id": req_id, "skip_evolution": True}
 
     from evolution.conjugate_agent import is_latest_conjugate
 
@@ -1252,7 +1289,7 @@ async def _evo_overview(request):
         from evolution.config import load_config
         from evolution.buffer_pool import BufferPool
         from evolution.db import get_session
-        from evolution.models import EvolutionSkill, EvolutionRuntimeState, EvolutionGameArchive
+        from evolution.models import EvolutionSkill, EvolutionRuntimeState, ConjugateAgentParticipation
         from sqlalchemy import func
 
         cfg = load_config()
@@ -1262,7 +1299,7 @@ async def _evo_overview(request):
         session = get_session()
         try:
             skill_count = session.query(func.count(EvolutionSkill.id)).scalar() or 0
-            total_games = session.query(func.count(EvolutionGameArchive.id)).scalar() or 0
+            total_games = session.query(func.count(ConjugateAgentParticipation.id)).scalar() or 0
             curator_record = session.get(EvolutionRuntimeState, "curator")
             curator_last_run = (curator_record.payload_json or {}).get("last_run_at") if curator_record else None
         finally:
