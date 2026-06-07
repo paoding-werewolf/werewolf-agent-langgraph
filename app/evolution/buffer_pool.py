@@ -67,7 +67,10 @@ class BufferPool:
             session.close()
 
     def load_pending(self) -> List[Dict]:
-        """加载所有 pending 建议。"""
+        """加载所有 pending 建议。
+
+        返回的每条建议包含 _item_key 字段，用于 delete_pending 精确定位行。
+        """
         session = get_session()
         try:
             items = session.query(EvolutionBufferItem).filter_by(item_type="pending").all()
@@ -75,9 +78,7 @@ class BufferPool:
             result = []
             for item in items:
                 payload = item.payload_json or {}
-                # 确保 suggestion_id 与 item_key 一致，保证 delete_pending 能正确找到
-                if "suggestion_id" not in payload:
-                    payload["suggestion_id"] = item.item_key
+                payload["_item_key"] = item.item_key
                 result.append(payload)
             return result
         finally:

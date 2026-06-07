@@ -35,7 +35,7 @@ class SuggestionClusterer:
                 "cluster_id": result.get("cluster_id"),
             })
             logger.info(f"Suggestion {suggestion.get('suggestion_id', '?')}: {result['action']} -> {result.get('cluster_id', 'N/A')}")
-            self.pool.delete_pending(suggestion.get("suggestion_id", ""))
+            self.pool.delete_pending(suggestion.get("_item_key") or suggestion.get("suggestion_id", ""))
 
         return processed
 
