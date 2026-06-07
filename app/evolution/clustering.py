@@ -59,7 +59,7 @@ class SuggestionClusterer:
 
         if best_match:
             cluster = self.pool.load_cluster(best_match)
-            if cluster and self._check_semantic_consistency(suggestion, cluster):
+            if cluster and self._check_semantic_consistency(suggestion, cluster, best_score):
                 cluster["suggestions"].append(suggestion)
                 from datetime import datetime, timezone
                 cluster["updated_at"] = datetime.now(timezone.utc).isoformat()
@@ -137,9 +137,17 @@ class SuggestionClusterer:
 
         return min(score, 1.0)
 
-    def _check_semantic_consistency(self, new_suggestion: Dict, cluster: Dict) -> bool:
-        """用 LLM 判断新建议与 cluster 内已有建议是否语义一致。"""
+    def _check_semantic_consistency(self, new_suggestion: Dict, cluster: Dict,
+                                        overlap_score: float = 0.0) -> bool:
+        """用 LLM 判断新建议与 cluster 内已有建议是否语义一致。
+
+        overlap_score >= 0.75 时（核心维度全部匹配），跳过 LLM 调用直接通过。
+        """
         if not cluster.get("suggestions"):
+            return True
+
+        if overlap_score >= 0.75:
+            logger.info(f"Overlap score {overlap_score:.2f} >= 0.75, skipping semantic LLM check (auto-consistent)")
             return True
 
         new_text = new_suggestion.get("suggestion", {}).get("text", "")
@@ -181,6 +189,9 @@ class SuggestionClusterer:
                 max_tokens=200,
             )
             answer = (resp.choices[0].message.content or "").strip().lower()
+            if not answer:
+                logger.warning("Semantic LLM check returned empty content, defaulting to consistent (allow merge)")
+                return True
             result = "consistent" in answer
             logger.info(f"Semantic LLM check: answer={answer!r}, result={'consistent' if result else 'inconsistent'}")
             return result
