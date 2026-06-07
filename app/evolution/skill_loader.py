@@ -125,7 +125,12 @@ class SkillLoader:
     # ── 版本竞争相关 ─────────────────────────────────────────
 
     def get_version_for_game(self, skill_name: str) -> str:
-        """版本竞争：决定本局使用哪个版本。"""
+        """版本竞争：决定本局使用哪个版本。
+
+        如果策略级已有足够对局数据（skill_games_played >= warmup_games），
+        说明策略整体经验充足，candidate 版本直接按固定比例获得对局机会。
+        否则（策略还很新），沿用 warmup 逻辑给 candidate 机会。
+        """
         session = get_session()
         try:
             skill = session.query(EvolutionSkill).filter_by(skill_name=skill_name).first()
@@ -137,16 +142,22 @@ class SkillLoader:
 
             for v in versions:
                 if v.status == "candidate":
-                    if v.games_played < self.cfg.versioning.warmup_games:
+                    if skill.skill_games_played >= self.cfg.versioning.warmup_games:
+                        # 策略已成熟：candidate 按固定比例获得对局，不受自身 games_played 限制
                         if random.random() < self.cfg.versioning.warmup_allocation:
                             return v.version
+                    else:
+                        # 策略还很新：沿用旧逻辑，candidate 需要自身还没攒够 warmup 场次
+                        if v.games_played < self.cfg.versioning.warmup_games:
+                            if random.random() < self.cfg.versioning.warmup_allocation:
+                                return v.version
 
             return current
         finally:
             session.close()
 
     def record_version_usage(self, skill_name: str, version: str, won: bool):
-        """对局结束后记录版本使用情况。"""
+        """对局结束后记录版本使用情况（版本级 + 策略级双写）。"""
         session = get_session()
         try:
             skill = session.query(EvolutionSkill).filter_by(skill_name=skill_name).first()
@@ -159,17 +170,25 @@ class SkillLoader:
             if not v:
                 return
 
+            # 版本级计数
             v.games_played += 1
             if won:
                 v.wins += 1
             v.win_rate = v.wins / v.games_played
             v.last_used_at = datetime.now(timezone.utc).replace(tzinfo=None)
 
+            # 策略级计数
+            skill.skill_games_played += 1
+            if won:
+                skill.skill_wins += 1
+            skill.skill_win_rate = skill.skill_wins / skill.skill_games_played
+
             if v.status == "candidate":
                 self._check_promotion(session, skill, v)
 
             session.commit()
             logger.debug(f"Version usage recorded: {skill_name} {version}, games={v.games_played}, wins={v.wins}, win_rate={v.win_rate:.2f}")
+            logger.debug(f"Skill usage: {skill_name}, total_games={skill.skill_games_played}, total_wins={skill.skill_wins}, total_win_rate={skill.skill_win_rate:.2f}")
         except Exception:
             session.rollback()
             raise
@@ -369,6 +388,9 @@ class SkillLoader:
                     "description": s.description or "",
                     "current_default": s.current_default,
                     "tags": s.tags_json or [],
+                    "skill_games_played": s.skill_games_played,
+                    "skill_wins": s.skill_wins,
+                    "skill_win_rate": float(s.skill_win_rate or 0.0),
                     "versions": [self._serialize_version(v) for v in versions],
                     "current_content": current.content_markdown if current else None,
                 })
@@ -393,6 +415,9 @@ class SkillLoader:
                 "description": skill.description or "",
                 "current_default": skill.current_default,
                 "tags": skill.tags_json or [],
+                "skill_games_played": skill.skill_games_played,
+                "skill_wins": skill.skill_wins,
+                "skill_win_rate": float(skill.skill_win_rate or 0.0),
                 "versions": [self._serialize_version(v) for v in versions],
                 "current_content": current.content_markdown if current else None,
             }

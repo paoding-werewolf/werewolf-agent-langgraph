@@ -307,16 +307,16 @@ class GEPA:
                     ),
                 }
 
-            # 检查是否有足够的对局数据
-            total_games = session.query(EvolutionSkillVersion).filter(
-                EvolutionSkillVersion.games_played >= self.gepa_cfg.min_games_for_fitness
+            # 检查是否有足够的对局数据（策略级累计，不受版本更新重置影响）
+            skills_with_enough_games = session.query(EvolutionSkill).filter(
+                EvolutionSkill.skill_games_played >= self.gepa_cfg.min_games_for_fitness
             ).count()
-            if total_games < 1:
+            if skills_with_enough_games < 1:
                 return {
                     "ok": False,
                     "reason": (
                         f"对局数据不足: 没有策略达到 "
-                        f"{self.gepa_cfg.min_games_for_fitness} 场对局的最低要求"
+                        f"{self.gepa_cfg.min_games_for_fitness} 场对局的最低要求（策略级累计）"
                     ),
                 }
 
@@ -359,6 +359,8 @@ class GEPA:
                         "games_played": v.games_played,
                         "wins": v.wins,
                         "win_rate": float(v.win_rate or 0.0),
+                        "skill_games_played": skill.skill_games_played,
+                        "skill_win_rate": float(skill.skill_win_rate or 0.0),
                         "source": v.source,
                         "role": skill.role,
                         "status": v.status,
@@ -397,12 +399,19 @@ class GEPA:
             # ── 维度 1: 胜率 ───────────────────────────────
             base_wr = ind.get("win_rate", 0.0)
             games = ind.get("games_played", 0)
+            skill_games = ind.get("skill_games_played", 0)
+            skill_wr = ind.get("skill_win_rate", 0.0)
             min_games = self.gepa_cfg.min_games_for_fitness
 
             if games >= min_games:
+                # 版本自身数据充足，直接用版本胜率
                 scores["win_rate"] = base_wr
+            elif skill_games >= min_games:
+                # 版本数据不足但策略级数据充足，用策略级胜率作为先验，版本数据做微调
+                version_ratio = games / min_games if min_games > 0 else 0
+                scores["win_rate"] = base_wr * version_ratio + skill_wr * (1 - version_ratio)
             elif games > 0:
-                # 数据不足惩罚：线性插值到 0.1（避免完全排除）
+                # 都不足，线性惩罚
                 penalty_ratio = games / min_games
                 scores["win_rate"] = base_wr * penalty_ratio + 0.1 * (1 - penalty_ratio)
             else:
@@ -846,7 +855,11 @@ class GEPA:
     @staticmethod
     def _clone_individual(ind: Dict[str, Any]) -> Dict[str, Any]:
         """深拷贝一个个体。"""
-        return dict(ind)
+        clone = dict(ind)
+        # 变异/交叉产生的个体不继承策略级统计（它们是虚拟个体）
+        clone.pop("skill_games_played", None)
+        clone.pop("skill_win_rate", None)
+        return clone
 
     def _get_individual_fitness(
         self, ind: Dict[str, Any], fitness_results: Dict[str, Dict[str, float]]

@@ -23,6 +23,9 @@ class EvolutionSkill(Base):
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     tags_json: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
     current_default: Mapped[str] = mapped_column(String(32), nullable=False)
+    skill_games_played: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    skill_wins: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    skill_win_rate: Mapped[float] = mapped_column(default=0.0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DATETIME, default=_utc_now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DATETIME, default=_utc_now, nullable=False)
 
