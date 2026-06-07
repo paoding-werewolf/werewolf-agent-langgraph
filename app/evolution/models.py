@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import DATETIME, Integer, JSON, String, Boolean, Text
+from sqlalchemy import DATETIME, Integer, JSON, String, Boolean, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from evolution.db import Base
@@ -63,6 +63,23 @@ class ConjugateAgent(Base):
     games_played: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     wins: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     win_rate: Mapped[float] = mapped_column(default=0.0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DATETIME, default=_utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DATETIME, default=_utc_now, nullable=False)
+
+
+class ConjugateAgentParticipation(Base):
+    __tablename__ = "conjugate_agent_participations"
+    __table_args__ = (
+        UniqueConstraint("room_id", "conjugate_agent_id", "seat_number", name="uq_conjugate_agent_participation"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    room_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    conjugate_agent_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    seat_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    role: Mapped[str] = mapped_column(String(32), nullable=False)
+    result: Mapped[str] = mapped_column(String(32), nullable=False)
+    is_winner: Mapped[bool] = mapped_column(Boolean, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DATETIME, default=_utc_now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DATETIME, default=_utc_now, nullable=False)
 
