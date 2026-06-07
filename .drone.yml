@@ -21,6 +21,7 @@ steps:
       - cd /deploy
       - git pull origin main
       - docker compose -p werewolf-agent-langgraph down
+      - docker rm -f werewolf-agent-langgraph 2>/dev/null || true
       - docker compose -p werewolf-agent-langgraph build werewolf-agent
       - docker compose -p werewolf-agent-langgraph up -d --force-recreate --remove-orphans werewolf-agent
     when:
