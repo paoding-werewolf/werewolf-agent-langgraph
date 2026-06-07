@@ -219,12 +219,13 @@ class BufferPool:
             session.close()
 
     def expire_old_suggestions(self) -> int:
-        """清理过期建议，返回清理数量。"""
+        """清理过期建议 + 超龄单建议 cluster，返回清理数量。"""
         cutoff = datetime.now(timezone.utc) - timedelta(days=self.cfg.buffer.max_age_days)
         cutoff_naive = cutoff.replace(tzinfo=None)
 
         session = get_session()
         try:
+            # 1. 过期 pending 建议
             items = session.query(EvolutionBufferItem).filter_by(item_type="pending").all()
             count = 0
             for item in items:
@@ -233,9 +234,26 @@ class BufferPool:
                     item.status = "expired"
                     count += 1
             if count:
+                logger.info(f"Expired {count} old pending suggestions (cutoff={cutoff_naive})")
+
+            # 2. 过期超龄单建议 cluster（suggestion_count=1 且超过 max_age_days）
+            stale_clusters = session.query(EvolutionBufferItem).filter_by(
+                item_type="cluster"
+            ).filter(
+                EvolutionBufferItem.suggestion_count <= 1,
+                EvolutionBufferItem.created_at < cutoff_naive,
+            ).all()
+            stale_count = 0
+            for item in stale_clusters:
+                item.item_type = "expired"
+                item.status = "expired"
+                stale_count += 1
+            if stale_count:
+                logger.info(f"Expired {stale_count} stale single-suggestion clusters (cutoff={cutoff_naive})")
+
+            if count or stale_count:
                 session.commit()
-                logger.info(f"Expired {count} old suggestions (cutoff={cutoff_naive})")
-            return count
+            return count + stale_count
         except Exception:
             session.rollback()
             raise

@@ -19,7 +19,7 @@ class BufferConfig:
     max_age_days: int = 30
     max_cluster_size: int = 20
     cleanup_interval_hours: int = 24
-    semantic_similarity_threshold: float = 0.75
+    semantic_similarity_threshold: float = 0.5
 
 
 @dataclass
