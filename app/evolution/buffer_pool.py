@@ -72,7 +72,14 @@ class BufferPool:
         try:
             items = session.query(EvolutionBufferItem).filter_by(item_type="pending").all()
             logger.debug(f"Loaded {len(items)} pending items")
-            return [item.payload_json for item in items]
+            result = []
+            for item in items:
+                payload = item.payload_json or {}
+                # 确保 suggestion_id 与 item_key 一致，保证 delete_pending 能正确找到
+                if "suggestion_id" not in payload:
+                    payload["suggestion_id"] = item.item_key
+                result.append(payload)
+            return result
         finally:
             session.close()
 

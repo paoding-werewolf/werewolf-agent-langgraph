@@ -32,13 +32,15 @@ def revert_to_pending(session, items) -> int:
     reverted = 0
     for item in items:
         payload = item.payload_json or {}
-        suggestion_id = payload.get("suggestion_id") or item.item_key
-        original_suggestion = payload
 
         # 如果 payload 中有完整的 suggestions 列表，取第一条
         suggestions = payload.get("suggestions", [])
+        original_suggestion = payload
         if suggestions:
             original_suggestion = suggestions[0]
+
+        # suggestion_id 在原始建议的顶层
+        suggestion_id = original_suggestion.get("suggestion_id") or payload.get("suggestion_id") or item.item_key
 
         # 删除旧的 cluster 行
         session.delete(item)
