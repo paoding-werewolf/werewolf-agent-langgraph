@@ -1363,7 +1363,7 @@ async def _evo_gepa_trigger(request):
         async def _run_gepa_background():
             from evolution.gepa import run as gepa_run
             try:
-                gepa_run(cfg)
+                await asyncio.to_thread(gepa_run, cfg)
             except Exception as e:
                 logger.error(f"GEPA run failed: {e}")
 
