@@ -1258,6 +1258,7 @@ async def _evo_games(request):
             games_meta = {}
             if game_ids:
                 try:
+                    import json as _json
                     result = session.execute(
                         text("SELECT room_id, round_count, duration_seconds, players_json, events_json FROM games WHERE room_id IN :ids"),
                         {"ids": tuple(game_ids)},
@@ -1271,7 +1272,10 @@ async def _evo_games(request):
                             "winner": None,
                         }
                         try:
-                            players = r[3] or []
+                            raw_players = r[3]
+                            if isinstance(raw_players, str):
+                                raw_players = _json.loads(raw_players)
+                            players = raw_players or []
                             meta["players_count"] = len(players)
                             meta["players"] = [
                                 {
@@ -1287,7 +1291,10 @@ async def _evo_games(request):
                         except Exception:
                             pass
                         try:
-                            events = r[4] or {}
+                            raw_events = r[4]
+                            if isinstance(raw_events, str):
+                                raw_events = _json.loads(raw_events)
+                            events = raw_events or {}
                             timeline = events.get("timeline", []) if isinstance(events, dict) else []
                             alive_map = {}
                             for evt in timeline:
