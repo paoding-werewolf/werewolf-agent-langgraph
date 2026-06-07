@@ -335,11 +335,11 @@ async def _process_perceive(session_id: str, req_id: str, status: str,
 
 
 async def _process_act(session_id: str, agent_id: str, req_id: str, status: str,
-                       message: str, round_num: int) -> list:
+                       message: str, round_num: int, on_frame=None) -> list:
     """处理行动请求 (按 session_id 路由).
 
-    返回帧列表: reflection 非空时先下发一帧 thought (思考过程回传),
-    再跟一帧 act_result.
+    返回帧列表: 无流式回调时先返回一帧 thought (思考过程回传), 再跟一帧
+    act_result; 有流式回调时 thought delta 会在生成过程中直接发送.
     """
     real_sid = store.resolve_session_id(session_id)
     state = store.get(session_id)
@@ -352,8 +352,32 @@ async def _process_act(session_id: str, agent_id: str, req_id: str, status: str,
         "message": message,
         "round": round_num,
     }
+    stream_id = f"{req_id}:reflect"
+    streamed_parts = []
+
+    async def handle_thought_delta(delta: str) -> None:
+        if not on_frame or not delta:
+            return
+        streamed_parts.append(delta)
+        await on_frame({
+            "type": "thought",
+            "session_id": session_id,
+            "agent_id": agent_id,
+            "round": round_num,
+            "phase": status,
+            "content": delta,
+            "delta": delta,
+            "stream_id": stream_id,
+            "stream_status": "delta",
+            "seq": 0,
+        })
+
     # LLM 调用是异步的，直接 await
-    result = await run_act(state, req_dict)
+    result = await run_act(
+        state,
+        req_dict,
+        on_thought_delta=handle_thought_delta if on_frame else None,
+    )
     store.set(real_sid, result)
 
     frames = []
@@ -369,6 +393,20 @@ async def _process_act(session_id: str, agent_id: str, req_id: str, status: str,
             "round": round_num,
             "phase": status,
             "content": thought,
+            "stream_id": stream_id,
+            "stream_status": "done",
+            "seq": 0,
+        })
+    elif thought.startswith("ERROR:") and on_frame and streamed_parts:
+        frames.append({
+            "type": "thought",
+            "session_id": session_id,
+            "agent_id": agent_id,
+            "round": round_num,
+            "phase": status,
+            "content": "".join(streamed_parts),
+            "stream_id": stream_id,
+            "stream_status": "error",
             "seq": 0,
         })
 
@@ -378,6 +416,9 @@ async def _process_act(session_id: str, agent_id: str, req_id: str, status: str,
         "req_id": req_id,
         "result": action.get("result", "PASS"),
         "target": action.get("target"),
+        "extra": action.get("extra") or {},
+        "error_type": action.get("error_type") or action.get("errorType"),
+        "error": action.get("error"),
     })
     return frames
 
@@ -422,6 +463,9 @@ async def handle_connection(ws: ServerConnection):
                 )
 
             elif msg_type == "act":
+                async def send_stream_frame(frame):
+                    await ws.send(json.dumps(frame, ensure_ascii=False))
+
                 resp = await _process_act(
                     _route_thread_id(msg, agent_id or ""),
                     agent_id or "",
@@ -429,6 +473,7 @@ async def handle_connection(ws: ServerConnection):
                     msg.get("status", ""),
                     msg.get("message", ""),
                     msg.get("round", 1),
+                    on_frame=send_stream_frame,
                 )
 
             elif msg_type == "game_over":

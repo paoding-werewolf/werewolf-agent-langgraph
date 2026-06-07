@@ -1,7 +1,7 @@
 import asyncio
 import json
 import re
-from typing import Literal, Optional
+from typing import Awaitable, Callable, Literal, Optional
 from core.enums import Role
 
 from agents.state import AgentState
@@ -256,7 +256,13 @@ def _extract_sheriff_from_events(events, current_sheriff):
                 return match.group(1)
     return current_sheriff
 
-async def _reflect_node(state: AgentState) -> AgentState:
+ThoughtDeltaCallback = Callable[[str], Awaitable[None]]
+
+
+async def _reflect_node(
+    state: AgentState,
+    on_thought_delta: ThoughtDeltaCallback | None = None,
+) -> AgentState:
     """AI 内部反思：分析游戏状态并形成思路。JSON 结构化输出。"""
     # Compress historical speeches (older than 2 days) before building prompt
     wm_data = state.get("working_memory")
@@ -307,6 +313,7 @@ async def _reflect_node(state: AgentState) -> AgentState:
         full_prompt,
         state.get("session_id", ""),
         state.get("external_agent_id", ""),
+        on_delta=on_thought_delta,
     )
 
     parsed = _parse_reflection_json(reflection)
@@ -687,7 +694,11 @@ async def perceive(state: AgentState, request: dict) -> AgentState:
     return _parse_event({**state, "request": request})
 
 
-async def act(state: AgentState, request: dict) -> dict:
+async def act(
+    state: AgentState,
+    request: dict,
+    on_thought_delta: ThoughtDeltaCallback | None = None,
+) -> dict:
     """基于当前会话状态做出一次行动决策。"""
     input_state = {
         **state,
@@ -705,7 +716,7 @@ async def act(state: AgentState, request: dict) -> dict:
             ),
         },
     }
-    reflected_state = await _reflect_node(input_state)
+    reflected_state = await _reflect_node(input_state, on_thought_delta=on_thought_delta)
     next_step = _route_by_phase(reflected_state)
     decision_handlers = {
         "decide_night_role": _decide_night_role,

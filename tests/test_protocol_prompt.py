@@ -1,5 +1,6 @@
 import os
 import sys
+from unittest.mock import AsyncMock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + "/app")
 
@@ -11,9 +12,11 @@ from agents.agent_graph import (
     _to_agent_game_state,
 )
 from agents.llm_caller import LLMCaller
+from agents.session_store import SessionStore
 from agents.prompt_builder import PromptBuilder
 from agents.protocol import normalize_action_status, normalize_event_status, normalize_status
 from core.enums import Role
+import main_ws
 from core.game_state import AgentGameState, PlayerPerception
 from memory.working_memory import WorkingMemory
 
@@ -376,6 +379,102 @@ def test_prompt_extra_data_injects_working_memory_object():
     assert "### Recent Speeches" in prompt
     assert "1号：我是好人，先听后置位。" in prompt
     assert "2号：警长发言，我会归票。" in prompt
+
+
+def test_llm_error_keeps_result_and_adds_error_field(monkeypatch):
+    caller = LLMCaller()
+
+    async def fail_chat(*_args, **_kwargs):
+        raise RuntimeError("upstream failed")
+
+    monkeypatch.setattr(caller, "_chat_with_tools", fail_chat)
+
+    result = __import__("asyncio").run(caller.decide_with_tools(
+        "agent-1",
+        "discussion",
+        "system",
+        "user",
+    ))
+
+    assert result["result"] == "ERROR: upstream failed"
+    assert result["error"] == "upstream failed"
+    assert result["error_type"] == "api_error"
+
+
+def test_process_act_includes_error_field(monkeypatch):
+    store = SessionStore()
+    state = _state()
+    store.create("s1", state, agent_id="agent-1")
+    monkeypatch.setattr(main_ws, "store", store)
+    monkeypatch.setattr(main_ws, "run_act", AsyncMock(return_value={
+        **state,
+        "last_thought": "",
+        "next_action": {
+            "result": "ERROR: upstream failed",
+            "target": "all",
+            "error_type": "api_error",
+            "error": "upstream failed",
+        },
+    }))
+
+    frames = __import__("asyncio").run(main_ws._process_act(
+        "s1",
+        "agent-1",
+        "req-1",
+        "discuss",
+        "请发言",
+        1,
+    ))
+
+    act_result = next(frame for frame in frames if frame["type"] == "act_result")
+    assert act_result["result"] == "ERROR: upstream failed"
+    assert act_result["error"] == "upstream failed"
+    assert act_result["error_type"] == "api_error"
+
+
+def test_process_act_streams_thought_delta_frames(monkeypatch):
+    store = SessionStore()
+    state = _state()
+    store.create("s1", state, agent_id="agent-1")
+    sent_frames = []
+
+    async def fake_run_act(_state, _request, on_thought_delta=None):
+        assert on_thought_delta is not None
+        await on_thought_delta("先看")
+        await on_thought_delta("票型")
+        return {
+            **state,
+            "last_thought": "先看票型",
+            "next_action": {
+                "result": "发言内容",
+                "target": "all",
+            },
+        }
+
+    async def collect_frame(frame):
+        sent_frames.append(frame)
+
+    monkeypatch.setattr(main_ws, "store", store)
+    monkeypatch.setattr(main_ws, "run_act", fake_run_act)
+
+    frames = __import__("asyncio").run(main_ws._process_act(
+        "s1",
+        "agent-1",
+        "req-1",
+        "discuss",
+        "请发言",
+        1,
+        on_frame=collect_frame,
+    ))
+
+    assert [frame["stream_status"] for frame in sent_frames] == ["delta", "delta"]
+    assert [frame["delta"] for frame in sent_frames] == ["先看", "票型"]
+    done_frame = next(frame for frame in frames if frame["type"] == "thought")
+    act_result = next(frame for frame in frames if frame["type"] == "act_result")
+    assert done_frame["content"] == "先看票型"
+    assert done_frame["stream_id"] == "req-1:reflect"
+    assert done_frame["stream_status"] == "done"
+    assert act_result["result"] == "发言内容"
 
 
 def test_prompt_extra_data_injects_personality_prompt():

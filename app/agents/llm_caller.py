@@ -1,7 +1,8 @@
 import json
 import os
 import re
-from typing import Optional, Dict, Any
+from enum import Enum
+from typing import Awaitable, Callable, Optional, Dict, Any
 
 from openai import AsyncOpenAI, OpenAI
 
@@ -103,6 +104,27 @@ TOOLS = [
 ]
 
 
+class AgentErrorType(str, Enum):
+    """Agent 行动错误类型，与服务端协议保持一致。"""
+
+    API_ERROR = "api_error"
+    TIMEOUT = "timeout"
+    LLM_UNEXPECTED_OUTPUT = "llm_unexpected_output"
+    INVALID_ACTION = "invalid_action"
+    TRANSPORT_ERROR = "transport_error"
+    UNKNOWN = "unknown"
+
+
+def _error_action(error_type: AgentErrorType, message: str) -> Dict[str, Any]:
+    return {
+        "result": f"ERROR: {message}",
+        "target": "all",
+        "extra": {"error_type": error_type.value, "error": message},
+        "error_type": error_type.value,
+        "error": message,
+    }
+
+
 class LLMCaller:
     def __init__(self):
         self.api_key = os.getenv("OPENAI_API_KEY")
@@ -199,7 +221,7 @@ class LLMCaller:
         except Exception as e:
             err = f"ERROR: {str(e)}"
             prompt_logger.log(agent_id, phase, system_prompt, user_msg, err, session_id, external_agent_id)
-            return {"result": err, "target": "all", "extra": {}}
+            return _error_action(AgentErrorType.API_ERROR, str(e))
         return self._process_tool_response(agent_id, phase, system_prompt, user_msg, message, session_id, external_agent_id)
 
     # Keep backward-compatible alias
@@ -225,7 +247,13 @@ class LLMCaller:
             try:
                 args = json.loads(tc.function.arguments or "{}")
             except json.JSONDecodeError:
-                args = {}
+                return {
+                    **_error_action(
+                        AgentErrorType.LLM_UNEXPECTED_OUTPUT,
+                        f"Invalid tool arguments for {tc.function.name}",
+                    ),
+                    "thought": content,
+                }
             action = self._tool_call_to_action(tc.function.name, args)
             action["thought"] = content
             return action
@@ -235,26 +263,88 @@ class LLMCaller:
             if match:
                 parsed = json.loads(match.group())
                 parsed.setdefault("thought", content)
+                if parsed.get("error") and not parsed.get("error_type"):
+                    parsed["error_type"] = AgentErrorType.UNKNOWN.value
                 return parsed
-            return {"result": content, "target": "all", "extra": {}, "thought": content}
+            return {
+                "result": content,
+                "target": "all",
+                "extra": {},
+                "thought": content,
+                "error_type": AgentErrorType.LLM_UNEXPECTED_OUTPUT.value,
+                "error": "LLM returned plain text without a tool call or JSON action",
+            }
         except Exception:
-            return {"result": content, "target": "all", "extra": {}, "thought": content}
+            return {
+                "result": content,
+                "target": "all",
+                "extra": {},
+                "thought": content,
+                "error_type": AgentErrorType.LLM_UNEXPECTED_OUTPUT.value,
+                "error": "LLM action response could not be parsed",
+            }
+
+    async def _stream_chat_content(
+        self,
+        system_prompt: str,
+        user_msg: str,
+        on_delta: Callable[[str], Awaitable[None]],
+    ) -> str:
+        _, model = self._require_model_config()
+        stream = await self.async_client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_msg},
+            ],
+            temperature=self.temperature,
+            stream=True,
+        )
+        parts = []
+        async for chunk in stream:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta.content or ""
+            if not delta:
+                continue
+            parts.append(delta)
+            await on_delta(delta)
+        return "".join(parts)
+
+    async def _chat_content(self, system_prompt: str, user_msg: str) -> str:
+        _, model = self._require_model_config()
+        resp = await self.async_client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_msg},
+            ],
+            temperature=self.temperature,
+        )
+        return resp.choices[0].message.content or ""
 
     async def call_with_log(self, agent_id: str, phase: str,
                             system_prompt: str, user_msg: str,
-                            session_id: str = "", external_agent_id: str = "") -> str:
+                            session_id: str = "", external_agent_id: str = "",
+                            on_delta: Optional[Callable[[str], Awaitable[None]]] = None) -> str:
         """Async LLM call that logs the prompt and returns the content."""
         try:
-            _, model = self._require_model_config()
-            resp = await self.async_client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_msg},
-                ],
-                temperature=self.temperature,
-            )
-            content = resp.choices[0].message.content or ""
+            if on_delta:
+                saw_delta = False
+
+                async def track_delta(delta: str) -> None:
+                    nonlocal saw_delta
+                    saw_delta = True
+                    await on_delta(delta)
+
+                try:
+                    content = await self._stream_chat_content(system_prompt, user_msg, track_delta)
+                except Exception:
+                    if saw_delta:
+                        raise
+                    content = await self._chat_content(system_prompt, user_msg)
+            else:
+                content = await self._chat_content(system_prompt, user_msg)
         except Exception as e:
             content = f"ERROR: {str(e)}"
 
