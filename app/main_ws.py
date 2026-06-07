@@ -1369,21 +1369,11 @@ async def _evo_gepa_trigger(request):
             return aiohttp_web.json_response(
                 {"detail": prereq["reason"]}, status=400)
 
-        # Initialize state to running
+        # Initialize state to running + launch background evolution
         trigger_result = gepa.trigger(cfg)
         if trigger_result.get("status") == "error":
             return aiohttp_web.json_response(
                 {"detail": trigger_result.get("detail", "prerequisites failed")}, status=400)
-
-        # Launch background evolution
-        async def _run_gepa_background():
-            from evolution.gepa import run as gepa_run
-            try:
-                await asyncio.to_thread(gepa_run, cfg)
-            except Exception as e:
-                logger.error(f"GEPA run failed: {e}")
-
-        _gepa_task = asyncio.create_task(_run_gepa_background())
 
         return aiohttp_web.json_response({"status": "started"})
     except Exception as e:
