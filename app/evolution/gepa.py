@@ -62,8 +62,9 @@ class GEPA:
         if not prereq["ok"]:
             return {"status": "error", "detail": prereq["reason"]}
 
-        # 初始化状态
+        # 初始化状态（保留上次运行的结果，直到新运行完成后再覆盖）
         now = datetime.now(timezone.utc).isoformat()
+        prev_state = self._load_state()
         initial_state = {
             "status": "running",
             "current_generation": 0,
@@ -72,8 +73,8 @@ class GEPA:
             "started_at": now,
             "updated_at": now,
             "completed_at": None,
-            "latest_results": {},
-            "history": [],
+            "latest_results": (prev_state or {}).get("latest_results", {}),
+            "history": (prev_state or {}).get("history", []),
         }
         self._save_state(initial_state)
         self._cancel_flag = False
@@ -112,9 +113,9 @@ class GEPA:
         return {"status": "idle", "detail": "GEPA 未在运行"}
 
     async def _run_wrapper(self, cfg: EvolutionConfig):
-        """异步包装器，捕获 run() 中的异常。"""
+        """异步包装器，在线程池中运行同步的 run()，避免阻塞事件循环。"""
         try:
-            self.run(cfg)
+            await asyncio.to_thread(self.run, cfg)
         except Exception:
             logger.exception("GEPA run() 异常终止")
             state = self._load_state()
