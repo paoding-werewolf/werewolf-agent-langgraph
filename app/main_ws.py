@@ -491,34 +491,50 @@ async def _debounced_global_pass(cfg) -> None:
 
 
 def _run_global_evolution_pass(cfg) -> None:
-    """池级 聚类 → 确认 → 过期清理 → Curator，每局只跑一次（线程内执行，不阻塞事件循环）。"""
-    from datetime import datetime, timezone
+    """池级聚类，每局只跑一次（线程内执行，不阻塞事件循环）。
+
+    确认和过期清理已移至独立定时任务 _confirmation_expire_loop，不再绑定游戏结束。
+    Curator 有自己的 _curator_monitor_loop。
+    """
     from evolution.buffer_pool import BufferPool
     from evolution.clustering import SuggestionClusterer
-    from evolution.confirmation import ConfirmationJudge
-    from evolution.version_manager import VersionManager
-    from evolution.curator import Curator
 
     pool = BufferPool(cfg)
-    vm = VersionManager(cfg)
-
     clusterer = SuggestionClusterer(cfg, pool)
     clusterer.process_pending()
+    logger.info("Global evolution pass (clustering only) complete")
 
-    judge = ConfirmationJudge(cfg, pool, vm)
-    judge.check_all_clusters()
 
-    pool.expire_old_suggestions()
+_CONFIRMATION_EXPIRE_INTERVAL_S = 3600  # 1 hour
 
-    curator = Curator(cfg)
-    curator._save_state({"last_game_end_at": datetime.now(timezone.utc).isoformat()})
-    if curator.should_run(is_game_in_progress=False):
+
+async def _confirmation_expire_loop(interval: float):
+    """每小时检查一次：确认满足条件的 cluster + 清理过期建议。"""
+    while True:
+        await asyncio.sleep(interval)
         try:
-            summary = curator.run()
-            logger.info(f"Curator run completed: {summary}")
-        except Exception as e:
-            logger.warning(f"Curator run failed: {e}")
-    logger.info("Global evolution pass complete")
+            from evolution.config import load_config
+            from evolution.buffer_pool import BufferPool
+            from evolution.confirmation import ConfirmationJudge
+            from evolution.version_manager import VersionManager
+            cfg = load_config()
+            if not cfg.enabled:
+                continue
+            pool = BufferPool(cfg)
+            # 只在有 cluster 时才跑
+            status = pool.get_status()
+            if status["cluster_count"] == 0 and status["expired_count"] == 0:
+                continue
+            vm = VersionManager(cfg)
+            judge = ConfirmationJudge(cfg, pool, vm)
+            confirmed = judge.check_all_clusters()
+            if confirmed:
+                logger.info(f"Confirmation expire loop: {len(confirmed)} clusters confirmed")
+            expired = pool.expire_old_suggestions()
+            if expired:
+                logger.info(f"Confirmation expire loop: {expired} suggestions expired")
+        except Exception:
+            logger.exception("Confirmation/expire loop check failed")
 
 
 _CURATOR_MONITOR_INTERVAL_S = 12 * 3600  # 12 hours
@@ -690,7 +706,7 @@ async def _run_post_game_pipeline(state: dict, result: str,
             # 5. Write to buffer pool
             pool.ingest(reflection)
 
-            # 6+7. 聚类/确认改为每局去抖动统一跑一次（坍缩 12 席并发，见 _schedule_global_evolution_pass）
+            # 6. 聚类每局去抖动统一跑一次（坍缩 12 席并发）；确认/过期由独立定时任务处理
             await _schedule_global_evolution_pass(cfg)
 
             # 8. Record strategy_gap
@@ -752,7 +768,7 @@ async def _run_post_game_pipeline(state: dict, result: str,
             for skill_name, version in versions_used.items():
                 vm.record_usage(skill_name, version, won)
 
-        # 11/12. 过期清理 + Curator 已并入 _run_global_evolution_pass（每局一次）
+        # 11/12. 确认 + 过期清理已移至独立定时任务 _confirmation_expire_loop（每小时一次）
 
         logger.info(f"Post-game pipeline complete for session {session_id}: result={result}")
     except Exception:
@@ -1497,6 +1513,7 @@ async def main(host: str = "0.0.0.0", port: int = 7861, http_port: int = 7860):
     cleanup_interval = min(max(store.ttl / 4, 60.0), 300.0)
     cleanup_task = asyncio.create_task(_cleanup_loop(cleanup_interval))
     curator_monitor_task = asyncio.create_task(_curator_monitor_loop(_CURATOR_MONITOR_INTERVAL_S))
+    confirmation_expire_task = asyncio.create_task(_confirmation_expire_loop(_CONFIRMATION_EXPIRE_INTERVAL_S))
 
     # ── HTTP 兼容服务 ──
     http_runner = None
@@ -1525,6 +1542,7 @@ async def main(host: str = "0.0.0.0", port: int = 7861, http_port: int = 7860):
         await http_runner.cleanup()
     cleanup_task.cancel()
     curator_monitor_task.cancel()
+    confirmation_expire_task.cancel()
 
 
 if __name__ == "__main__":
