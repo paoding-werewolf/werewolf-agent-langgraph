@@ -95,12 +95,28 @@ def _provider_public_urls() -> tuple[str, str]:
     return f"http://{public_host}:{http_port}", f"ws://{public_host}:{ws_port}"
 
 
+def _normalize_version_name(version: str) -> str:
+    value = (version or "").strip()
+    if not value:
+        return ""
+    return value if value.startswith("v") else f"v{value}"
+
+
+def _strategy_role(role: str) -> str:
+    return "wolf" if role in {"wolf", "wolf_king"} else role
+
+
+def _strategy_camp(role: str) -> str:
+    return "wolf" if _strategy_role(role) == "wolf" else "good"
+
+
 def _build_versions_used(role: str, external_agent_id: str | None = None) -> dict:
     """Build the concrete skill-version map for one game session.
 
     Provider mode currently exposes:
     - a default participant using each skill's current selection logic
-    - per-skill candidate participants that override one skill to a fixed version
+    - role-scoped participants that lock all role/common skills to one version
+    - per-skill participants that override one skill to a fixed version
     """
     from evolution.config import load_config
     from evolution.version_manager import VersionManager
@@ -109,15 +125,34 @@ def _build_versions_used(role: str, external_agent_id: str | None = None) -> dic
     vm = VersionManager(cfg)
     index = vm.loader.load_index()
     versions_used = {}
+    strategy_role = _strategy_role(role)
+    strategy_camp = _strategy_camp(role)
     for skill in index:
-        if skill.get("role") in (role, "common"):
+        if skill.get("role") in (strategy_role, "common"):
             versions_used[skill["name"]] = vm.loader.get_version_for_game(skill["name"])
 
     if external_agent_id:
         parts = external_agent_id.split(":")
-        if len(parts) == 4 and parts[0] == "skill":
+        if len(parts) == 3 and parts[0] == "role":
+            _, agent_role, version = parts
+            version = _normalize_version_name(version)
+            if agent_role == strategy_role and version:
+                for skill_name in list(versions_used):
+                    meta = vm.loader._load_versions_meta(skill_name) or {}
+                    if version in (meta.get("versions") or {}):
+                        versions_used[skill_name] = version
+        elif len(parts) == 3 and parts[0] == "camp":
+            _, agent_camp, version = parts
+            version = _normalize_version_name(version)
+            if agent_camp == strategy_camp and version:
+                for skill_name in list(versions_used):
+                    meta = vm.loader._load_versions_meta(skill_name) or {}
+                    if version in (meta.get("versions") or {}):
+                        versions_used[skill_name] = version
+        elif len(parts) == 4 and parts[0] == "skill":
             _, skill_name, version, agent_role = parts
-            if agent_role == role and skill_name in versions_used:
+            version = _normalize_version_name(version)
+            if agent_role == strategy_role and version and skill_name in versions_used:
                 versions_used[skill_name] = version
 
     return versions_used
@@ -186,6 +221,7 @@ def _list_provider_agents() -> list[dict]:
     for role, skills in grouped.items():
         if role == "common":
             continue
+        role_versions: set[str] = set()
         for skill in skills:
             skill_name = str(skill.get("name") or "").strip()
             if not skill_name:
@@ -199,11 +235,10 @@ def _list_provider_agents() -> list[dict]:
             if not isinstance(versions, dict):
                 logger.warning("Skip invalid versions metadata for skill %s: %r", skill_name, versions)
                 continue
+            role_versions.update(str(version_name) for version_name in versions.keys())
             for version_name, version_meta in versions.items():
                 if not isinstance(version_meta, dict):
                     logger.warning("Skip invalid version entry for skill %s version %s", skill_name, version_name)
-                    continue
-                if version_meta.get("status") != "candidate":
                     continue
                 result.append(
                     {
@@ -225,6 +260,59 @@ def _list_provider_agents() -> list[dict]:
                         },
                     }
                 )
+        for version_name in sorted(role_versions, key=lambda item: int(item.lstrip("v")) if item.lstrip("v").isdigit() else 0):
+            result.append(
+                {
+                    "external_agent_id": f"role:{role}:{version_name}",
+                    "agent_name": f"{role}:{version_name}",
+                    "client_type": "ws",
+                    "client_url": ws_base,
+                    "model_name": "werewolf-agent-langgraph",
+                    "version": version_name,
+                    "health": "available",
+                    "status": "available",
+                    "metadata": {
+                        "mode": "role_lock",
+                        "role_scope": role,
+                        "skill_version": version_name,
+                        "skill_count": len(skills),
+                    },
+                }
+            )
+    good_versions: set[str] = set()
+    good_roles = [role for role in grouped.keys() if role not in {"common", "wolf"}]
+    for role in good_roles:
+        for skill in grouped[role]:
+            skill_name = str(skill.get("name") or "").strip()
+            if not skill_name:
+                continue
+            try:
+                meta = vm.loader._load_versions_meta(skill_name) or {}
+            except Exception:
+                logger.exception("Failed to load version metadata for skill %s", skill_name)
+                continue
+            versions = meta.get("versions", {})
+            if isinstance(versions, dict):
+                good_versions.update(str(version_name) for version_name in versions.keys())
+    for version_name in sorted(good_versions, key=lambda item: int(item.lstrip("v")) if item.lstrip("v").isdigit() else 0):
+        result.append(
+            {
+                "external_agent_id": f"camp:good:{version_name}",
+                "agent_name": f"good:{version_name}",
+                "client_type": "ws",
+                "client_url": ws_base,
+                "model_name": "werewolf-agent-langgraph",
+                "version": version_name,
+                "health": "available",
+                "status": "available",
+                "metadata": {
+                    "mode": "camp_lock",
+                    "camp_scope": "good",
+                    "skill_version": version_name,
+                    "role_count": len(good_roles),
+                },
+            }
+        )
     return result
 
 

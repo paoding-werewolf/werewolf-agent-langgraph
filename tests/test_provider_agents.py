@@ -12,7 +12,7 @@ os.environ["PROVIDER_PUBLIC_WS_URL"] = "ws://provider.test:8082"
 
 from evolution.db import Base, engine, get_session
 from evolution.models import EvolutionSkill, EvolutionSkillVersion
-from main_ws import _list_provider_agents
+from main_ws import _build_versions_used, _list_provider_agents
 
 
 def setup_module():
@@ -45,6 +45,21 @@ def test_list_provider_agents_includes_candidate_versions():
                 content_markdown="candidate",
             ),
         ])
+        good_skill = EvolutionSkill(
+            skill_name="seer-logic",
+            role="seer",
+            description="seer strategy",
+            tags_json=["seer"],
+            current_default="v1",
+        )
+        session.add(good_skill)
+        session.flush()
+        session.add(EvolutionSkillVersion(
+            skill_id=good_skill.id,
+            version="v1",
+            status="active",
+            content_markdown="seer base",
+        ))
         session.commit()
     finally:
         session.close()
@@ -53,7 +68,30 @@ def test_list_provider_agents_includes_candidate_versions():
 
     default_agent = next(a for a in agents if a["external_agent_id"] == "default:common")
     candidate_agent = next(a for a in agents if a["external_agent_id"] == "skill:wolf-logic:v2:wolf")
+    role_agent = next(a for a in agents if a["external_agent_id"] == "role:wolf:v1")
+    camp_agent = next(a for a in agents if a["external_agent_id"] == "camp:good:v1")
 
     assert default_agent["client_url"] == "ws://provider.test:8082"
     assert candidate_agent["version"] == "v2"
     assert candidate_agent["metadata"]["skill_name"] == "wolf-logic"
+    assert role_agent["metadata"]["mode"] == "role_lock"
+    assert camp_agent["metadata"]["mode"] == "camp_lock"
+
+
+def test_role_lock_external_agent_id_freezes_role_versions():
+    versions = _build_versions_used("wolf", "role:wolf:v1")
+
+    assert versions["wolf-logic"] == "v1"
+
+
+def test_role_lock_external_agent_id_does_not_apply_to_other_roles():
+    versions = _build_versions_used("villager", "role:wolf:v1")
+
+    assert "wolf-logic" not in versions
+
+
+def test_camp_lock_external_agent_id_freezes_good_versions():
+    versions = _build_versions_used("seer", "camp:good:v1")
+
+    assert versions["seer-logic"] == "v1"
+    assert "wolf-logic" not in versions

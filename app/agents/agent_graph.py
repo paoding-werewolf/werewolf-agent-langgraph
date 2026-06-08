@@ -19,8 +19,10 @@ def _get_evolution_strategies(state: AgentState) -> str:
     from evolution.version_manager import VersionManager
     cfg = load_config()
     vm = VersionManager(cfg)
+    my_role = state["my_role"]
+    strategy_role = "wolf" if my_role in {"wolf", "wolf_king"} else my_role
     return vm.format_skills_for_prompt(
-        state["my_role"], state.get("phase", ""), versions_used
+        strategy_role, state.get("phase", ""), versions_used
     )
 
 PRIVATE_NIGHT_ACTIONS = {
