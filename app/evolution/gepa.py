@@ -895,22 +895,20 @@ class GEPA:
             session.close()
 
     def _save_state(self, state: Dict[str, Any]):
-        """保存 GEPA 状态到数据库（合并写入）。"""
+        """保存 GEPA 状态到数据库（全量覆盖写入）。"""
         from sqlalchemy.orm.attributes import flag_modified
 
-        existing = self._load_state()
-        existing.update(state)
         now = datetime.now(timezone.utc).replace(tzinfo=None)
 
         session = get_session()
         try:
             record = session.get(EvolutionRuntimeState, "gepa")
             if record:
-                record.payload_json = existing
+                record.payload_json = state
                 flag_modified(record, "payload_json")
                 record.updated_at = now
             else:
-                session.add(EvolutionRuntimeState(state_key="gepa", payload_json=existing))
+                session.add(EvolutionRuntimeState(state_key="gepa", payload_json=state))
             session.commit()
         except Exception:
             session.rollback()
