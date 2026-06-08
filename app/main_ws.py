@@ -1198,7 +1198,7 @@ async def _evo_insights(request):
             EvolutionSkill, EvolutionSkillVersion, EvolutionGameArchive,
             EvolutionRuntimeState, EvolutionBufferItem,
         )
-        from sqlalchemy import func
+        from sqlalchemy import func, text
         import json
 
         session = get_session()
@@ -1307,6 +1307,62 @@ async def _evo_insights(request):
                 {"camp": "wolf", "win_rate": wolf_win_rate},
             ]
 
+            # ── promotion deltas: superseded vs active win_rate ──
+            delta_rows2 = session.execute(
+                text("""
+                    SELECT
+                        s.skill_name,
+                        sv_old.version as old_version,
+                        COALESCE(sv_old.win_rate, 0) as old_win_rate,
+                        sv_old.games_played as old_games,
+                        sv_new.version as new_version,
+                        COALESCE(sv_new.win_rate, 0) as new_win_rate,
+                        sv_new.games_played as new_games,
+                        COALESCE(sv_new.win_rate, 0) - COALESCE(sv_old.win_rate, 0) as delta
+                    FROM evolution_skill_versions sv_old
+                    JOIN evolution_skills s ON s.id = sv_old.skill_id
+                    JOIN evolution_skill_versions sv_new
+                        ON sv_new.skill_id = s.id
+                        AND sv_new.status = 'active'
+                    WHERE sv_old.status = 'superseded'
+                    ORDER BY delta DESC
+                """)
+            ).fetchall()
+
+            promotion_deltas = []
+            pos = neg = zero = 0
+            total_delta = 0.0
+            for row in delta_rows2:
+                d = round(float(row[7]), 4)
+                promotion_deltas.append({
+                    "skill_name": row[0],
+                    "old_version": row[1],
+                    "old_win_rate": round(float(row[2]), 4),
+                    "old_games": row[3] or 0,
+                    "new_version": row[4],
+                    "new_win_rate": round(float(row[5]), 4),
+                    "new_games": row[6] or 0,
+                    "delta": d,
+                })
+                total_delta += d
+                if d > 0.001:
+                    pos += 1
+                elif d < -0.001:
+                    neg += 1
+                else:
+                    zero += 1
+
+            n_deltas = len(promotion_deltas)
+            delta_summary = {
+                "count": n_deltas,
+                "positive": pos,
+                "negative": neg,
+                "zero": zero,
+                "avg_delta": round(total_delta / n_deltas, 4) if n_deltas > 0 else 0,
+                "min_delta": round(min(d["delta"] for d in promotion_deltas), 4) if promotion_deltas else 0,
+                "max_delta": round(max(d["delta"] for d in promotion_deltas), 4) if promotion_deltas else 0,
+            }
+
         finally:
             session.close()
 
@@ -1314,6 +1370,8 @@ async def _evo_insights(request):
             "summary": summary,
             "gepa": gepa_data,
             "promotions": promotions,
+            "promotion_deltas": promotion_deltas,
+            "delta_summary": delta_summary,
             "role_diversity": role_diversity,
             "camp_win_rates": camp_win_rates,
         })
