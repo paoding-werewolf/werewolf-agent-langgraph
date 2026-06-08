@@ -1479,9 +1479,12 @@ async def _evo_summary_generate(request):
         from evolution.summary import EvolutionSummary
         from evolution.config import load_config
 
-        cfg = load_config()
-        summary = EvolutionSummary(cfg)
-        result = summary.generate(cfg)
+        def _do_generate():
+            cfg = load_config()
+            summary = EvolutionSummary(cfg)
+            return summary.generate(cfg)
+
+        result = await asyncio.to_thread(_do_generate)
         return aiohttp_web.json_response(result)
     except Exception as e:
         return aiohttp_web.json_response({"detail": str(e)}, status=500)
