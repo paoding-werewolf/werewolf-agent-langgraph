@@ -28,7 +28,7 @@ class ConfirmationConfig:
     normal_min_consistency_rate: float = 0.50
     normal_min_avg_causal_strength: float = 0.35
     fast_track_min_causal_strength: float = 0.70
-    fast_track_min_count: int = 2
+    fast_track_min_count: int = 1
 
 
 @dataclass
