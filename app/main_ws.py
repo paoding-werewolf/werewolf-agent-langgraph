@@ -2136,7 +2136,7 @@ async def _evo_curator_trigger(request):
             )
 
         curator = Curator(cfg)
-        summary = curator.run()
+        summary = await asyncio.to_thread(curator.run)
 
         return aiohttp_web.json_response({
             "success": True,
