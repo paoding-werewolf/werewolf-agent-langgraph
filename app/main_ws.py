@@ -1174,6 +1174,7 @@ def _create_http_app():
     app.router.add_post("/evolution/skills/{skill_name}/versions", _evo_create_version)
     app.router.add_get("/evolution/skills/{skill_name}/diff", _evo_diff)
     app.router.add_get("/evolution/gaps", _evo_gaps)
+    app.router.add_get("/evolution/gaps/{gap_id}", _evo_gap_detail)
     app.router.add_get("/evolution/games", _evo_games)
     app.router.add_get("/evolution/curator/status", _evo_curator_status)
     app.router.add_post("/evolution/curator/trigger", _evo_curator_trigger)
@@ -1931,6 +1932,18 @@ async def _evo_gaps(request):
         from memory.game_archive import get_frequent_gaps
         min_count = int(request.query.get("min_count", "3"))
         return aiohttp_web.json_response(get_frequent_gaps(min_count))
+    except Exception as e:
+        return aiohttp_web.json_response({"detail": str(e)}, status=500)
+
+
+async def _evo_gap_detail(request):
+    try:
+        from memory.game_archive import get_gap_detail
+        gap_id = int(request.match_info["gap_id"])
+        detail = get_gap_detail(gap_id)
+        if detail is None:
+            return aiohttp_web.json_response({"detail": "Not found"}, status=404)
+        return aiohttp_web.json_response(detail)
     except Exception as e:
         return aiohttp_web.json_response({"detail": str(e)}, status=500)
 
