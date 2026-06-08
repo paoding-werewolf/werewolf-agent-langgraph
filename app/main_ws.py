@@ -2135,8 +2135,12 @@ async def _evo_curator_status(request):
         return aiohttp_web.json_response({"detail": str(e)}, status=500)
 
 
+_curator_task: asyncio.Task | None = None
+
+
 async def _evo_curator_trigger(request):
-    """手动触发策展人立即运行。"""
+    """手动触发策展人立即运行（后台执行，立即返回）。"""
+    global _curator_task
     try:
         from evolution.config import load_config
         from evolution.curator import Curator
@@ -2148,12 +2152,25 @@ async def _evo_curator_trigger(request):
                 status=400,
             )
 
-        curator = Curator(cfg)
-        summary = await asyncio.to_thread(curator.run)
+        if _curator_task and not _curator_task.done():
+            return aiohttp_web.json_response(
+                {"success": False, "detail": "Curator is already running"},
+                status=409,
+            )
+
+        async def _run():
+            curator = Curator(cfg)
+            try:
+                summary = await asyncio.to_thread(curator.run)
+                logger.info(f"[Curator] 手动触发完成: {summary}")
+            except Exception:
+                logger.exception("[Curator] 手动触发失败")
+
+        _curator_task = asyncio.create_task(_run())
 
         return aiohttp_web.json_response({
             "success": True,
-            "summary": summary,
+            "status": "started",
         })
     except Exception as e:
         return aiohttp_web.json_response({"success": False, "detail": str(e)}, status=500)
