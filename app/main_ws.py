@@ -30,7 +30,6 @@ WebSocket Agent Service — 与 WebSocketAgentClient 配套的落地实现。
 """
 
 import asyncio
-import difflib
 import email.utils
 import http
 import json
@@ -39,7 +38,6 @@ import os
 import signal
 import sys
 import uuid
-from collections import defaultdict
 from urllib.parse import urlsplit, parse_qs
 
 import websockets
@@ -95,108 +93,51 @@ def _provider_public_urls() -> tuple[str, str]:
     return f"http://{public_host}:{http_port}", f"ws://{public_host}:{ws_port}"
 
 
-def _normalize_version_name(version: str) -> str:
-    value = (version or "").strip()
-    if not value:
-        return ""
-    return value if value.startswith("v") else f"v{value}"
-
-
-def _version_number(version: str) -> int:
-    normalized = _normalize_version_name(version)
-    suffix = normalized.lstrip("v")
-    return int(suffix) if suffix.isdigit() else -1
-
-
-def _version_sort_key(version: str) -> tuple[int, str]:
-    return (_version_number(version), version)
-
-
-def _best_version_at_or_below(target_version: str, versions: dict) -> str:
-    target_number = _version_number(target_version)
-    if target_number < 0:
-        return ""
-    candidates = [
-        str(version_name)
-        for version_name in versions.keys()
-        if 0 <= _version_number(str(version_name)) <= target_number
-    ]
-    if not candidates:
-        return ""
-    return max(candidates, key=_version_sort_key)
-
-
 def _strategy_role(role: str) -> str:
     return "wolf" if role in {"wolf", "wolf_king"} else role
 
 
-def _strategy_camp(role: str) -> str:
-    return "wolf" if _strategy_role(role) == "wolf" else "good"
-
-
 def _build_versions_used(role: str, external_agent_id: str | None = None) -> dict:
-    """Build the concrete skill-version map for one game session.
+    """为一局游戏生成实际 skill-version 映射。
 
-    Provider mode currently exposes:
-    - a default participant using each skill's current selection logic
-    - role-scoped participants that lock all role/common skills to one version
-    - per-skill participants that override one skill to a fixed version
+    指定历史 Conjugate Agent 时返回冻结快照；最新/默认 Agent 继续参与 warmup
+    和版本竞争。
     """
     from evolution.config import load_config
+    from evolution.conjugate_agent import get_conjugate_agent, is_latest_conjugate
+    from evolution.db import get_session
     from evolution.version_manager import VersionManager
+
+    if external_agent_id and not is_latest_conjugate(external_agent_id):
+        session = get_session()
+        try:
+            agent = get_conjugate_agent(session, external_agent_id)
+            if agent:
+                return dict(agent.skill_versions_json or {})
+        finally:
+            session.close()
 
     cfg = load_config()
     vm = VersionManager(cfg)
     index = vm.loader.load_index()
     versions_used = {}
     strategy_role = _strategy_role(role)
-    strategy_camp = _strategy_camp(role)
     for skill in index:
         skill_role = _strategy_role(str(skill.get("role") or "common"))
         if skill_role in (strategy_role, "common"):
             versions_used[skill["name"]] = vm.loader.get_version_for_game(skill["name"])
-
-    if external_agent_id:
-        parts = external_agent_id.split(":")
-        if len(parts) == 3 and parts[0] == "role":
-            _, agent_role, version = parts
-            version = _normalize_version_name(version)
-            if agent_role == strategy_role and version:
-                for skill_name in list(versions_used):
-                    meta = vm.loader._load_versions_meta(skill_name) or {}
-                    best_version = _best_version_at_or_below(version, meta.get("versions") or {})
-                    if best_version:
-                        versions_used[skill_name] = best_version
-        elif len(parts) == 3 and parts[0] == "camp":
-            _, agent_camp, version = parts
-            version = _normalize_version_name(version)
-            if agent_camp == strategy_camp and version:
-                for skill_name in list(versions_used):
-                    meta = vm.loader._load_versions_meta(skill_name) or {}
-                    best_version = _best_version_at_or_below(version, meta.get("versions") or {})
-                    if best_version:
-                        versions_used[skill_name] = best_version
-        elif len(parts) == 4 and parts[0] == "skill":
-            _, skill_name, version, agent_role = parts
-            version = _normalize_version_name(version)
-            if agent_role == strategy_role and version and skill_name in versions_used:
-                versions_used[skill_name] = version
-
     return versions_used
 
 
 def _list_provider_agents() -> list[dict]:
-    """Expose version-addressable participants for the orchestration layer."""
-    from evolution.config import load_config
-    from evolution.version_manager import VersionManager
+    """向编排层暴露共轭 Agent 列表。"""
+    from evolution.conjugate_agent import list_conjugate_agents
 
     _http_base, ws_base = _provider_public_urls()
-    cfg = load_config()
-    vm = VersionManager(cfg)
     try:
-        index = vm.loader.load_index()
+        agents = list_conjugate_agents()
     except Exception:
-        logger.exception("Failed to load evolution skill index for provider agents")
+        logger.exception("Failed to load conjugate agents for provider agents")
         return [
             {
                 "external_agent_id": "default:common",
@@ -215,132 +156,31 @@ def _list_provider_agents() -> list[dict]:
                 },
             }
         ]
-    grouped: dict[str, list[dict]] = defaultdict(list)
-    for skill in index:
-        if not isinstance(skill, dict):
-            logger.warning("Skip non-dict skill index entry: %r", skill)
-            continue
-        skill_name = str(skill.get("name") or "").strip()
-        if not skill_name:
-            logger.warning("Skip skill index entry without name: %r", skill)
-            continue
-        role = _strategy_role(str(skill.get("role") or "common").strip() or "common")
-        grouped[role].append(skill)
-
-    result = [
+    latest_id = agents[0].id if agents else None
+    return [
         {
-            "external_agent_id": "default:common",
-            "agent_name": "DefaultAgent",
+            "external_agent_id": f"agent:{agent.id}",
+            "agent_name": agent.agent_name,
             "client_type": "ws",
             "client_url": ws_base,
             "model_name": "werewolf-agent-langgraph",
-            "version": "default",
+            "version": agent.fingerprint[:16],
             "health": "available",
             "status": "available",
             "metadata": {
-                "mode": "default",
-                "role_scope": "all",
-                "skill_count": len(index),
+                "mode": "conjugate",
+                "fingerprint": agent.fingerprint,
+                "born_at": agent.born_at.isoformat() if agent.born_at else "",
+                "avatar_seed": agent.avatar_seed,
+                "is_latest": agent.id == latest_id,
+                "skill_versions": agent.skill_versions_json or {},
+                "skill_count": len(agent.skill_versions_json or {}),
+                "changelog": agent.changelog,
+                "lore": agent.lore,
             },
         }
+        for agent in agents
     ]
-
-    for role, skills in grouped.items():
-        if role == "common":
-            continue
-        role_versions: set[str] = set()
-        for skill in skills:
-            skill_name = str(skill.get("name") or "").strip()
-            if not skill_name:
-                continue
-            try:
-                meta = vm.loader._load_versions_meta(skill_name) or {}
-            except Exception:
-                logger.exception("Failed to load version metadata for skill %s", skill_name)
-                continue
-            versions = meta.get("versions", {})
-            if not isinstance(versions, dict):
-                logger.warning("Skip invalid versions metadata for skill %s: %r", skill_name, versions)
-                continue
-            role_versions.update(str(version_name) for version_name in versions.keys())
-            for version_name, version_meta in versions.items():
-                if not isinstance(version_meta, dict):
-                    logger.warning("Skip invalid version entry for skill %s version %s", skill_name, version_name)
-                    continue
-                result.append(
-                    {
-                        "external_agent_id": f"skill:{skill_name}:{version_name}:{role}",
-                        "agent_name": f"{skill_name}:{version_name}",
-                        "client_type": "ws",
-                        "client_url": ws_base,
-                        "model_name": "werewolf-agent-langgraph",
-                        "version": version_name,
-                        "health": "available",
-                        "status": "available",
-                        "metadata": {
-                            "mode": "skill_override",
-                            "role_scope": role,
-                            "skill_name": skill_name,
-                            "skill_version": version_name,
-                            "description": skill.get("description", ""),
-                            "usage": version_meta.get("usage", {}),
-                        },
-                    }
-                )
-        for version_name in sorted(role_versions, key=_version_sort_key):
-            result.append(
-                {
-                    "external_agent_id": f"role:{role}:{version_name}",
-                    "agent_name": f"{role}:{version_name}",
-                    "client_type": "ws",
-                    "client_url": ws_base,
-                    "model_name": "werewolf-agent-langgraph",
-                    "version": version_name,
-                    "health": "available",
-                    "status": "available",
-                    "metadata": {
-                        "mode": "role_lock",
-                        "role_scope": role,
-                        "skill_version": version_name,
-                        "skill_count": len(skills),
-                    },
-                }
-            )
-    good_versions: set[str] = set()
-    good_roles = [role for role in grouped.keys() if role not in {"common", "wolf"}]
-    for role in good_roles:
-        for skill in grouped[role]:
-            skill_name = str(skill.get("name") or "").strip()
-            if not skill_name:
-                continue
-            try:
-                meta = vm.loader._load_versions_meta(skill_name) or {}
-            except Exception:
-                logger.exception("Failed to load version metadata for skill %s", skill_name)
-                continue
-            versions = meta.get("versions", {})
-            if isinstance(versions, dict):
-                good_versions.update(str(version_name) for version_name in versions.keys())
-    for version_name in sorted(good_versions, key=_version_sort_key):
-        result.append(
-            {
-                "external_agent_id": f"camp:good:{version_name}",
-                "agent_name": f"good:{version_name}",
-                "client_type": "ws",
-                "client_url": ws_base,
-                "model_name": "werewolf-agent-langgraph",
-                "version": version_name,
-                "health": "available",
-                "status": "available",
-                "metadata": {
-                    "mode": "camp_lock",
-                    "camp_scope": "good",
-                    "skill_version": version_name,
-                    "role_count": len(good_roles),
-                },
-            }
-        )
-    return result
 
 
 
@@ -691,6 +531,22 @@ async def _process_game_over(session_id: str, req_id: str,
     if skip_evolution:
         logger.info(f"Session {session_id}: skip_evolution=True (builtin AI in game), skipping post-game pipeline.")
         return {"type": "game_over_ack", "req_id": req_id, "skip_evolution": True}
+
+    from evolution.conjugate_agent import is_latest_conjugate
+
+    external_agent_id = state.get("external_agent_id", "")
+    if not is_latest_conjugate(external_agent_id):
+        logger.info(
+            "Session %s: external_agent_id=%s is frozen conjugate agent, skipping evolution pipeline.",
+            session_id,
+            external_agent_id,
+        )
+        return {
+            "type": "game_over_ack",
+            "req_id": req_id,
+            "skip_evolution": True,
+            "reason": "frozen_conjugate_agent",
+        }
 
     state["room_id"] = room_id
     asyncio.create_task(_run_post_game_pipeline(

@@ -49,6 +49,24 @@ class EvolutionSkillVersion(Base):
     updated_at: Mapped[datetime] = mapped_column(DATETIME, default=_utc_now, nullable=False)
 
 
+class ConjugateAgent(Base):
+    __tablename__ = "conjugate_agents"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    fingerprint: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    agent_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    avatar_seed: Mapped[str] = mapped_column(String(128), nullable=False)
+    born_at: Mapped[datetime] = mapped_column(DATETIME, nullable=False)
+    skill_versions_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    changelog: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    lore: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    games_played: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    wins: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    win_rate: Mapped[float] = mapped_column(default=0.0, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DATETIME, default=_utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DATETIME, default=_utc_now, nullable=False)
+
+
 class EvolutionBufferItem(Base):
     __tablename__ = "evolution_buffer_items"
 

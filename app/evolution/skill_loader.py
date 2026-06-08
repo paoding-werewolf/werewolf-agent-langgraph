@@ -7,6 +7,7 @@
 """
 import logging
 import random
+import asyncio
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone
 
@@ -15,6 +16,7 @@ from sqlalchemy import func
 from evolution.config import EvolutionConfig
 from evolution.db import get_session
 from evolution.models import EvolutionSkill, EvolutionSkillVersion
+from evolution.conjugate_agent import maybe_create_conjugate_agent, generate_lore_async
 
 logger = logging.getLogger("evolution.skill_loader")
 
@@ -189,10 +191,13 @@ class SkillLoader:
                 skill.skill_wins += 1
             skill.skill_win_rate = skill.skill_wins / skill.skill_games_played
 
+            lore_agent_id = None
             if v.status == "candidate":
-                self._check_promotion(session, skill, v)
+                lore_agent_id = self._check_promotion(session, skill, v)
 
             session.commit()
+            if lore_agent_id:
+                self._schedule_lore_generation(lore_agent_id)
             logger.debug(f"Version usage recorded: {skill_name} {version}, games={v.games_played}, wins={v.wins}, win_rate={v.win_rate:.2f}")
             logger.debug(f"Skill usage: {skill_name}, total_games={skill.skill_games_played}, total_wins={skill.skill_wins}, total_win_rate={skill.skill_win_rate:.2f}")
         except Exception:
@@ -201,7 +206,7 @@ class SkillLoader:
         finally:
             session.close()
 
-    def _check_promotion(self, session, skill: EvolutionSkill, candidate: EvolutionSkillVersion):
+    def _check_promotion(self, session, skill: EvolutionSkill, candidate: EvolutionSkillVersion) -> int | None:
         """检查 candidate 版本是否满足升级条件。"""
         current_default = skill.current_default
         current = session.query(EvolutionSkillVersion).filter_by(
@@ -212,10 +217,29 @@ class SkillLoader:
         if current:
             if (candidate.games_played >= cfg.promotion_min_games and
                     candidate.win_rate - current.win_rate >= cfg.promotion_min_win_rate_delta):
+                previous_version = current_default
                 candidate.status = "active"
                 skill.current_default = candidate.version
                 current.status = "superseded"
                 logger.info(f"Version PROMOTED: {skill.skill_name} {candidate.version} (games={candidate.games_played}, win_rate={candidate.win_rate:.2f}) superseded {current_default} (win_rate={current.win_rate:.2f})")
+                agent = maybe_create_conjugate_agent(
+                    session,
+                    trigger_skill=skill,
+                    previous_version=previous_version,
+                    promoted_version=candidate,
+                )
+                if agent:
+                    return agent.id
+        return None
+
+    def _schedule_lore_generation(self, agent_id: int) -> None:
+        """尽力后台生成 lore；无事件循环时不阻塞晋升事务。"""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.info("Skip async lore generation for agent %s: no running event loop", agent_id)
+            return
+        loop.create_task(generate_lore_async(agent_id))
 
     def create_new_version(self, skill_name: str, content: str,
                            source: str = "debounced_update",
