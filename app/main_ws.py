@@ -1148,22 +1148,29 @@ async def _evo_force_confirm(request):
         from evolution.buffer_pool import BufferPool
         from evolution.confirmation import ConfirmationJudge
         from evolution.version_manager import VersionManager
-        cfg = load_config()
-        pool = BufferPool(cfg)
-        cluster_id = request.match_info["cluster_id"]
-        cluster = pool.load_cluster(cluster_id)
-        if not cluster:
-            return aiohttp_web.json_response({"detail": "Cluster not found"}, status=404)
-        target_skill = cluster.get("target_skill", "")
-        suggestions = cluster.get("suggestions", [])
-        if not target_skill or not suggestions:
-            return aiohttp_web.json_response({"detail": "Cluster has no target_skill or suggestions"}, status=400)
-        vm = VersionManager(cfg)
-        judge = ConfirmationJudge(cfg, pool, vm)
-        new_content = judge._synthesize_strategy(suggestions, target_skill)
-        version_name = vm.create_new_version(target_skill, new_content, "manual_force_confirm", cluster_id)
-        pool.move_to_confirmed(cluster_id)
-        return aiohttp_web.json_response({"success": True, "cluster_id": cluster_id, "skill_name": target_skill, "new_version": version_name})
+
+        def _do_confirm():
+            cfg = load_config()
+            pool = BufferPool(cfg)
+            cluster_id = request.match_info["cluster_id"]
+            cluster = pool.load_cluster(cluster_id)
+            if not cluster:
+                return None, "Cluster not found", 404
+            target_skill = cluster.get("target_skill", "")
+            suggestions = cluster.get("suggestions", [])
+            if not target_skill or not suggestions:
+                return None, "Cluster has no target_skill or suggestions", 400
+            vm = VersionManager(cfg)
+            judge = ConfirmationJudge(cfg, pool, vm)
+            new_content = judge._synthesize_strategy(suggestions, target_skill)
+            version_name = vm.create_new_version(target_skill, new_content, "manual_force_confirm", cluster_id)
+            pool.move_to_confirmed(cluster_id)
+            return {"success": True, "cluster_id": cluster_id, "skill_name": target_skill, "new_version": version_name}, None, 200
+
+        result, err, status = await asyncio.to_thread(_do_confirm)
+        if err:
+            return aiohttp_web.json_response({"detail": err}, status=status)
+        return aiohttp_web.json_response(result)
     except Exception as e:
         return aiohttp_web.json_response({"detail": str(e)}, status=500)
 
