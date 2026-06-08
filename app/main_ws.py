@@ -799,7 +799,7 @@ async def _process_game_over(session_id: str, req_id: str,
             scene_tags={"result": result},
             reflection_report="",
             full_trace="",
-            strategies_used=state.get("strategies_used", []),
+            strategies_used=list(state.get("versions_used", {}).keys()),
             versions_used=state.get("versions_used", {}),
         )
         logger.info(f"Immediate game archive saved: room={room_id}, role={state['my_role']}, result={result}")
@@ -981,7 +981,7 @@ async def _run_post_game_pipeline(state: dict, result: str,
                 },
                 reflection_report=yaml.dump(asdict(reflection), allow_unicode=True, default_flow_style=False),
                 full_trace=game_trace,
-                strategies_used=state.get("strategies_used", []),
+                strategies_used=list(state.get("versions_used", {}).keys()),
                 versions_used=state.get("versions_used", {}),
             )
 
@@ -1185,6 +1185,7 @@ def _create_http_app():
     app.router.add_get("/evolution/logs", _evo_logs)
     app.router.add_get("/evolution/insights", _evo_insights)
     app.router.add_get("/evolution/trends", _evo_trends)
+    app.router.add_get("/evolution/attribution", _evo_attribution)
 
     return app
 
@@ -1475,6 +1476,82 @@ async def _evo_trends(request):
             "metric": metric,
             "points": points,
             "versions": version_markers,
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return aiohttp_web.json_response({"detail": str(e)}, status=500)
+
+
+async def _evo_attribution(request):
+    """Per-strategy win-rate lift from game archives.
+
+    For each strategy that appears in strategies_used, compute:
+    - games_with: games where this strategy was used
+    - wins_with: wins in those games
+    - win_rate_with: wins / games
+    - lift: win_rate_with - overall_win_rate
+    """
+    try:
+        from evolution.db import get_session
+        from evolution.models import EvolutionGameArchive
+        from sqlalchemy import func
+        import json
+
+        session = get_session()
+        try:
+            # Get all games with strategies
+            games = session.query(EvolutionGameArchive).all()
+
+            # Compute overall win rate
+            total = 0
+            total_wins = 0
+            strategy_stats: dict[str, dict] = {}
+
+            for g in games:
+                p = json.loads(g.payload_json) if isinstance(g.payload_json, str) else g.payload_json
+                if not isinstance(p, dict):
+                    continue
+                strats = p.get("strategies_used", [])
+                if not strats:
+                    continue
+                is_win = g.result in ("won", "good_won", "wolf_won")
+                total += 1
+                if is_win:
+                    total_wins += 1
+                for s in strats:
+                    if s not in strategy_stats:
+                        strategy_stats[s] = {"games": 0, "wins": 0}
+                    strategy_stats[s]["games"] += 1
+                    if is_win:
+                        strategy_stats[s]["wins"] += 1
+
+            overall_wr = total_wins / total if total > 0 else 0.0
+
+            attribution = []
+            for name, stats in strategy_stats.items():
+                g = stats["games"]
+                w = stats["wins"]
+                wr = w / g if g > 0 else 0.0
+                lift = wr - overall_wr
+                attribution.append({
+                    "skill_name": name,
+                    "games": g,
+                    "wins": w,
+                    "win_rate": round(wr, 4),
+                    "lift": round(lift, 4),
+                })
+
+            # Sort by lift descending
+            attribution.sort(key=lambda x: x["lift"], reverse=True)
+
+        finally:
+            session.close()
+
+        return aiohttp_web.json_response({
+            "attribution": attribution,
+            "total_games": total,
+            "overall_win_rate": round(overall_wr, 4),
         })
     except Exception as e:
         import traceback
