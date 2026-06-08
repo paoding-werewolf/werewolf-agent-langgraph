@@ -23,6 +23,9 @@ class SkillLoader:
     def __init__(self, cfg: EvolutionConfig):
         self.cfg = cfg
 
+    def _strategy_role(self, role: str) -> str:
+        return "wolf" if role in {"wolf", "wolf_king"} else role
+
     # ── Layer 1: 索引 ──────────────────────────────────────
 
     def load_index(self) -> List[Dict[str, str]]:
@@ -46,7 +49,8 @@ class SkillLoader:
     def format_index_for_prompt(self, my_role: str) -> str:
         """将索引格式化为 prompt 片段。只展示当前角色 + common 类别。"""
         skills = self.load_index()
-        relevant = [s for s in skills if s.get("role") in (my_role, "common")]
+        strategy_role = self._strategy_role(my_role)
+        relevant = [s for s in skills if s.get("role") in (strategy_role, "common")]
         if not relevant:
             return ""
         lines = ["## Available Strategy Skills"]
@@ -77,9 +81,10 @@ class SkillLoader:
     def load_skills_for_context(self, my_role: str, phase: str) -> str:
         """根据当前角色和阶段，加载相关策略全文。最多加载 3 个。"""
         skills = self.load_index()
+        strategy_role = self._strategy_role(my_role)
         relevant = [
             s for s in skills
-            if s.get("role") in (my_role, "common")
+            if s.get("role") in (strategy_role, "common")
         ]
 
         phase_tags = self._phase_to_tags(phase)
@@ -101,9 +106,10 @@ class SkillLoader:
                                   versions_used: dict) -> str:
         """与 load_skills_for_context 相同，但按 versions_used 指定版本加载。"""
         skills = self.load_index()
+        strategy_role = self._strategy_role(my_role)
         relevant = [
             s for s in skills
-            if s.get("role") in (my_role, "common")
+            if s.get("role") in (strategy_role, "common")
         ]
 
         phase_tags = self._phase_to_tags(phase)

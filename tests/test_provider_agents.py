@@ -60,6 +60,21 @@ def test_list_provider_agents_includes_candidate_versions():
             status="active",
             content_markdown="seer base",
         ))
+        wolf_king_skill = EvolutionSkill(
+            skill_name="wolf-king-logic",
+            role="wolf_king",
+            description="wolf king strategy",
+            tags_json=["wolf"],
+            current_default="v1",
+        )
+        session.add(wolf_king_skill)
+        session.flush()
+        session.add(EvolutionSkillVersion(
+            skill_id=wolf_king_skill.id,
+            version="v1",
+            status="active",
+            content_markdown="wolf king base",
+        ))
         session.commit()
     finally:
         session.close()
@@ -68,13 +83,17 @@ def test_list_provider_agents_includes_candidate_versions():
 
     default_agent = next(a for a in agents if a["external_agent_id"] == "default:common")
     candidate_agent = next(a for a in agents if a["external_agent_id"] == "skill:wolf-logic:v2:wolf")
+    wolf_king_agent = next(a for a in agents if a["external_agent_id"] == "skill:wolf-king-logic:v1:wolf")
     role_agent = next(a for a in agents if a["external_agent_id"] == "role:wolf:v1")
+    role_v2_agent = next(a for a in agents if a["external_agent_id"] == "role:wolf:v2")
     camp_agent = next(a for a in agents if a["external_agent_id"] == "camp:good:v1")
 
     assert default_agent["client_url"] == "ws://provider.test:8082"
     assert candidate_agent["version"] == "v2"
     assert candidate_agent["metadata"]["skill_name"] == "wolf-logic"
+    assert wolf_king_agent["metadata"]["role_scope"] == "wolf"
     assert role_agent["metadata"]["mode"] == "role_lock"
+    assert role_v2_agent["metadata"]["role_scope"] == "wolf"
     assert camp_agent["metadata"]["mode"] == "camp_lock"
 
 
@@ -82,6 +101,14 @@ def test_role_lock_external_agent_id_freezes_role_versions():
     versions = _build_versions_used("wolf", "role:wolf:v1")
 
     assert versions["wolf-logic"] == "v1"
+    assert versions["wolf-king-logic"] == "v1"
+
+
+def test_role_lock_external_agent_id_uses_best_available_version_at_or_below_target():
+    versions = _build_versions_used("wolf", "role:wolf:v2")
+
+    assert versions["wolf-logic"] == "v2"
+    assert versions["wolf-king-logic"] == "v1"
 
 
 def test_role_lock_external_agent_id_does_not_apply_to_other_roles():

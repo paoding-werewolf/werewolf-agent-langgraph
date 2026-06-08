@@ -102,6 +102,30 @@ def _normalize_version_name(version: str) -> str:
     return value if value.startswith("v") else f"v{value}"
 
 
+def _version_number(version: str) -> int:
+    normalized = _normalize_version_name(version)
+    suffix = normalized.lstrip("v")
+    return int(suffix) if suffix.isdigit() else -1
+
+
+def _version_sort_key(version: str) -> tuple[int, str]:
+    return (_version_number(version), version)
+
+
+def _best_version_at_or_below(target_version: str, versions: dict) -> str:
+    target_number = _version_number(target_version)
+    if target_number < 0:
+        return ""
+    candidates = [
+        str(version_name)
+        for version_name in versions.keys()
+        if 0 <= _version_number(str(version_name)) <= target_number
+    ]
+    if not candidates:
+        return ""
+    return max(candidates, key=_version_sort_key)
+
+
 def _strategy_role(role: str) -> str:
     return "wolf" if role in {"wolf", "wolf_king"} else role
 
@@ -128,7 +152,8 @@ def _build_versions_used(role: str, external_agent_id: str | None = None) -> dic
     strategy_role = _strategy_role(role)
     strategy_camp = _strategy_camp(role)
     for skill in index:
-        if skill.get("role") in (strategy_role, "common"):
+        skill_role = _strategy_role(str(skill.get("role") or "common"))
+        if skill_role in (strategy_role, "common"):
             versions_used[skill["name"]] = vm.loader.get_version_for_game(skill["name"])
 
     if external_agent_id:
@@ -139,16 +164,18 @@ def _build_versions_used(role: str, external_agent_id: str | None = None) -> dic
             if agent_role == strategy_role and version:
                 for skill_name in list(versions_used):
                     meta = vm.loader._load_versions_meta(skill_name) or {}
-                    if version in (meta.get("versions") or {}):
-                        versions_used[skill_name] = version
+                    best_version = _best_version_at_or_below(version, meta.get("versions") or {})
+                    if best_version:
+                        versions_used[skill_name] = best_version
         elif len(parts) == 3 and parts[0] == "camp":
             _, agent_camp, version = parts
             version = _normalize_version_name(version)
             if agent_camp == strategy_camp and version:
                 for skill_name in list(versions_used):
                     meta = vm.loader._load_versions_meta(skill_name) or {}
-                    if version in (meta.get("versions") or {}):
-                        versions_used[skill_name] = version
+                    best_version = _best_version_at_or_below(version, meta.get("versions") or {})
+                    if best_version:
+                        versions_used[skill_name] = best_version
         elif len(parts) == 4 and parts[0] == "skill":
             _, skill_name, version, agent_role = parts
             version = _normalize_version_name(version)
@@ -197,7 +224,7 @@ def _list_provider_agents() -> list[dict]:
         if not skill_name:
             logger.warning("Skip skill index entry without name: %r", skill)
             continue
-        role = str(skill.get("role") or "common").strip() or "common"
+        role = _strategy_role(str(skill.get("role") or "common").strip() or "common")
         grouped[role].append(skill)
 
     result = [
@@ -260,7 +287,7 @@ def _list_provider_agents() -> list[dict]:
                         },
                     }
                 )
-        for version_name in sorted(role_versions, key=lambda item: int(item.lstrip("v")) if item.lstrip("v").isdigit() else 0):
+        for version_name in sorted(role_versions, key=_version_sort_key):
             result.append(
                 {
                     "external_agent_id": f"role:{role}:{version_name}",
@@ -294,7 +321,7 @@ def _list_provider_agents() -> list[dict]:
             versions = meta.get("versions", {})
             if isinstance(versions, dict):
                 good_versions.update(str(version_name) for version_name in versions.keys())
-    for version_name in sorted(good_versions, key=lambda item: int(item.lstrip("v")) if item.lstrip("v").isdigit() else 0):
+    for version_name in sorted(good_versions, key=_version_sort_key):
         result.append(
             {
                 "external_agent_id": f"camp:good:{version_name}",
