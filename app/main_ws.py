@@ -498,19 +498,20 @@ _CURATOR_MONITOR_INTERVAL_S = 12 * 3600  # 12 hours
 async def _curator_monitor_loop(interval: float):
     """每 interval 秒检查一次策略库变动，有变动则触发 Curator。"""
     while True:
-        await asyncio.sleep(interval)
         try:
             from evolution.config import load_config
             from evolution.curator import Curator
             cfg = load_config()
             if not cfg.enabled or not cfg.curator.enabled:
-                continue
-            curator = Curator(cfg)
-            if curator.should_run(is_game_in_progress=False):
-                summary = curator.run()
-                logger.info(f"Curator monitor triggered: {summary}")
+                pass
+            else:
+                curator = Curator(cfg)
+                if curator.should_run(is_game_in_progress=False):
+                    summary = curator.run()
+                    logger.info(f"Curator monitor triggered: {summary}")
         except Exception:
             logger.exception("Curator monitor check failed")
+        await asyncio.sleep(interval)
 
 
 async def _process_game_over(session_id: str, req_id: str,
@@ -1131,6 +1132,16 @@ async def _evo_confirm_clusters(request):
         def _do():
             cfg = load_config()
             pool = BufferPool(cfg)
+            # Fix clusters with empty target_skill before judging
+            for cid in pool.list_clusters():
+                cluster = pool.load_cluster(cid)
+                if cluster and not cluster.get("target_skill"):
+                    suggestions = cluster.get("suggestions", [])
+                    if suggestions:
+                        ts = suggestions[0].get("suggestion", {}).get("target_skill", "")
+                        if ts:
+                            cluster["target_skill"] = ts
+                            pool.save_cluster(cid, cluster)
             vm = VersionManager(cfg)
             judge = ConfirmationJudge(cfg, pool, vm)
             confirmed = judge.check_all_clusters()
@@ -1173,6 +1184,9 @@ async def _evo_force_confirm(request):
                 return None, "Cluster not found", 404
             target_skill = cluster.get("target_skill", "")
             suggestions = cluster.get("suggestions", [])
+            # Fallback: derive target_skill from first suggestion if cluster-level is empty
+            if not target_skill and suggestions:
+                target_skill = suggestions[0].get("suggestion", {}).get("target_skill", "")
             if not target_skill or not suggestions:
                 return None, "Cluster has no target_skill or suggestions", 400
             vm = VersionManager(cfg)
@@ -1375,7 +1389,9 @@ async def _evo_curator_status(request):
         last_run_at = payload.get("last_run_at")
         last_game_end_at = payload.get("last_game_end_at")
 
+        now = datetime.now(timezone.utc)
         next_run_at = None
+        is_overdue = False
         if last_run_at:
             try:
                 last_run_dt = datetime.fromisoformat(last_run_at)
@@ -1386,7 +1402,12 @@ async def _evo_curator_status(request):
                     idle_delta = timedelta(hours=cfg.curator.min_idle_hours)
                     idle_candidate = last_game_dt + idle_delta
                     candidate = max(candidate, idle_candidate)
-                next_run_at = candidate.isoformat()
+                if candidate < now:
+                    is_overdue = True
+                    # 已逾期但监控循环还没触发，显示"现在"暗示即将运行
+                    next_run_at = now.isoformat()
+                else:
+                    next_run_at = candidate.isoformat()
             except (ValueError, TypeError):
                 pass
 
@@ -1415,6 +1436,7 @@ async def _evo_curator_status(request):
                 "last_run_at": last_run_at,
                 "last_game_end_at": last_game_end_at,
                 "next_run_at": next_run_at,
+                "is_overdue": is_overdue,
             },
         })
     except Exception as e:

@@ -65,6 +65,9 @@ class SuggestionClusterer:
                 cluster["updated_at"] = datetime.now(timezone.utc).isoformat()
                 cluster["avg_causal_strength"] = self._avg_causal_strength(cluster["suggestions"])
                 cluster["consistency_rate"] = self._consistency_rate(cluster["suggestions"])
+                # Ensure target_skill is set from suggestions if column was empty
+                if not cluster.get("target_skill") and target_skill:
+                    cluster["target_skill"] = target_skill
 
                 if len(cluster["suggestions"]) > self.cfg.buffer.max_cluster_size:
                     cluster["suggestions"].sort(key=lambda s: s.get("created_at", ""))

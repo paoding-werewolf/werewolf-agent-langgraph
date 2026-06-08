@@ -129,6 +129,10 @@ class ConfirmationJudge:
         target_skill = cluster.get("target_skill", "")
         suggestions = cluster.get("suggestions", [])
 
+        # Fallback: derive target_skill from first suggestion if cluster-level is empty
+        if not target_skill and suggestions:
+            target_skill = suggestions[0].get("suggestion", {}).get("target_skill", "")
+
         if not target_skill or not suggestions:
             logger.warning(f"Cannot execute confirmation for {cluster_id}: missing target_skill or suggestions")
             return

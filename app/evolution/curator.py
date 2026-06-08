@@ -49,15 +49,6 @@ class Curator:
             if hours_since_game < self.cfg.curator.min_idle_hours:
                 return False
 
-        # 变动检测：只有当 confirmed 技能数或总对局数发生变化时才触发
-        current_confirmed, current_games = self._current_counts()
-        last_confirmed = state.get("last_confirmed_count", -1)
-        last_games = state.get("last_total_games", -1)
-        if current_confirmed == last_confirmed and current_games == last_games:
-            # 无变动，跳过本次，更新 last_run_at 避免频繁空跑
-            self._save_state({"last_run_at": now.isoformat()})
-            return False
-
         return True
 
     def _current_counts(self) -> tuple:
@@ -348,8 +339,8 @@ class Curator:
         finally:
             session.close()
 
-    def _save_state(self, state: Dict):
-        """全量覆盖写入状态。"""
+    def _save_state(self, updates: Dict):
+        """合并写入状态（保留未提及的字段）。"""
         from sqlalchemy.orm.attributes import flag_modified
 
         now = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -358,11 +349,13 @@ class Curator:
         try:
             record = session.get(EvolutionRuntimeState, "curator")
             if record:
-                record.payload_json = state
+                merged = dict(record.payload_json)
+                merged.update(updates)
+                record.payload_json = merged
                 flag_modified(record, "payload_json")
                 record.updated_at = now
             else:
-                session.add(EvolutionRuntimeState(state_key="curator", payload_json=state))
+                session.add(EvolutionRuntimeState(state_key="curator", payload_json=updates))
             session.commit()
         except Exception:
             session.rollback()

@@ -85,7 +85,11 @@ class BufferPool:
             session.close()
 
     def load_cluster(self, cluster_id: str) -> Optional[Dict]:
-        """加载指定 cluster 的全部建议（cluster 或 confirmed 均可）。"""
+        """加载指定 cluster 的全部建议（cluster 或 confirmed 均可）。
+
+        返回的 dict 包含 payload_json 中的所有原始字段（保证 save_cluster
+        回写时不会丢失数据），同时用列值覆盖顶层指标（确保一致性）。
+        """
         session = get_session()
         try:
             item = session.query(EvolutionBufferItem).filter(
@@ -94,7 +98,10 @@ class BufferPool:
             ).first()
             if not item:
                 return None
-            result = {
+            # Start from full payload to preserve all fields on roundtrip
+            result = dict(item.payload_json) if item.payload_json else {}
+            # Overlay authoritative column values
+            result.update({
                 "cluster_id": item.item_key,
                 "suggestion_count": item.suggestion_count,
                 "target_skill": item.target_skill_name or "",
@@ -104,9 +111,7 @@ class BufferPool:
                 "preview_texts": item.preview_texts_json or [],
                 "created_at": item.created_at.isoformat() if item.created_at else None,
                 "updated_at": item.updated_at.isoformat() if item.updated_at else None,
-            }
-            if item.payload_json and "suggestions" in item.payload_json:
-                result["suggestions"] = item.payload_json["suggestions"]
+            })
             return result
         finally:
             session.close()
@@ -128,6 +133,13 @@ class BufferPool:
             text = (s.get("suggestion") or {}).get("text", "")
             if text:
                 preview_texts.append(text[:80])
+
+        # Ensure target_skill is populated from suggestions if missing
+        target_skill = data.get("target_skill", "")
+        if not target_skill and suggestions:
+            target_skill = suggestions[0].get("suggestion", {}).get("target_skill", "")
+            if target_skill:
+                data["target_skill"] = target_skill
 
         session = get_session()
         try:
