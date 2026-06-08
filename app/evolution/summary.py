@@ -246,18 +246,34 @@ class EvolutionSummary:
                 skill = session.query(EvolutionSkill).filter_by(id=v.skill_id).first()
                 new_versions.append({
                     "skill_name": skill.skill_name if skill else str(v.skill_id),
+                    "role": skill.role if skill else "未知",
                     "version": v.version,
                     "win_rate": float(v.win_rate or 0),
                     "games_played": v.games_played,
+                    "created_at": v.created_at.isoformat() if v.created_at else "",
                 })
 
             # GEPA 运行状态
             record = session.get(EvolutionRuntimeState, "gepa")
             gepa_state = dict(record.payload_json) if record else {}
 
+            # 从 GEPA history 提取代际摘要
+            generations = []
+            for h in gepa_state.get("history", []):
+                gen = {
+                    "generation": h.get("generation"),
+                    "mutations": h.get("mutations", 0),
+                    "crossovers": h.get("crossovers", 0),
+                    "pareto_front": h.get("pareto_front", []),
+                    "new_versions": h.get("new_versions_created", []),
+                    "best_fitness": h.get("best_fitness", {}),
+                }
+                generations.append(gen)
+
             return {
                 "new_versions": new_versions,
                 "state": gepa_state,
+                "generations": generations,
             }
         finally:
             session.close()
@@ -323,7 +339,8 @@ class EvolutionSummary:
             "3. 缓冲池动态 — 新的建议在积累，哪些集群被确认通过\n"
             "4. 发现的问题 — 策略缺口意味着什么场景缺乏指导\n"
             "5. 策展人工作 — 上次做了什么维护操作\n"
-            "6. GEPA 进化 — 是否运行，产生了什么新策略\n"
+            "6. GEPA 进化 — 是否运行，产生了什么新策略，重点描述哪个角色的哪个策略"
+            "被变异或交叉，以及 Pareto 前沿变化\n"
             "7. 整体对局表现 — 近期胜负趋势，各角色表现概览"
         )
 
@@ -430,18 +447,96 @@ class EvolutionSummary:
 
     def _format_gepa(self, data: Dict) -> str:
         new_versions = data.get("new_versions", [])
+        generations = data.get("generations", [])
         state = data.get("state", {})
+
         if not new_versions and not state:
             return "（本周期内无 GEPA 离线进化活动）"
+
         lines = []
+
+        # GEPA 运行概况
+        status = state.get("status", "idle")
+        total_gens = state.get("total_generations", 0)
+        current_gen = state.get("current_generation", 0)
+        if status == "running":
+            lines.append(f"GEPA 正在运行中（第 {current_gen}/{total_gens} 代）")
+        elif status in ("completed", "cancelled"):
+            completed_at = state.get("completed_at", "")
+            lines.append(f"GEPA 已{('完成' if status == 'completed' else '取消')}，共完成 {len(generations)} 代" + (f"，完成时间 {completed_at[:19]}" if completed_at else ""))
+
+        # 代际详情
+        if generations:
+            lines.append("")
+            lines.append("各代进化详情：")
+            for g in generations:
+                gen_num = g.get("generation", "?")
+                mut = g.get("mutations", 0)
+                cross = g.get("crossovers", 0)
+                new_vers = g.get("new_versions", [])
+                pareto = g.get("pareto_front", [])
+                fitness = g.get("best_fitness", {})
+
+                # 解析策略角色
+                skills_by_role: Dict[str, list] = {}
+                for v_name in new_vers:
+                    # 版本名格式: skill-name:version
+                    skill_name = v_name.rsplit(":", 1)[0] if ":" in v_name else v_name
+                    role = "未知"
+                    for nv in new_versions:
+                        if nv["skill_name"] == skill_name:
+                            role = nv["role"]
+                            break
+                    if role not in skills_by_role:
+                        skills_by_role[role] = []
+                    skills_by_role[role].append(v_name)
+
+                # 同理解析 Pareto 前沿
+                pareto_skills = []
+                for p in pareto:
+                    skill_name = p.rsplit(":", 1)[0] if ":" in p else p
+                    pareto_skills.append(skill_name)
+
+                parts = [f"第 {gen_num} 代："]
+                ops = []
+                if mut:
+                    ops.append(f"{mut} 次变异")
+                if cross:
+                    ops.append(f"{cross} 次交叉")
+                if ops:
+                    parts.append(f"执行了 {'、'.join(ops)}；")
+
+                if skills_by_role:
+                    role_parts = []
+                    for role, vers in skills_by_role.items():
+                        role_parts.append(f"{role}角色策略「{vers[0].rsplit(':', 1)[0] if ':' in vers[0] else vers[0]}」产生 {len(vers)} 个新版本")
+                    parts.append("、".join(role_parts) + "；")
+
+                if pareto_skills:
+                    unique_skills = list(dict.fromkeys(pareto_skills))
+                    parts.append(f"Pareto 前沿 {len(pareto)} 个策略（{', '.join(unique_skills[:5])}）")
+
+                if fitness:
+                    wr = fitness.get("win_rate")
+                    if wr is not None:
+                        parts.append(f"，最佳胜率 {wr:.0%}")
+
+                lines.append("".join(parts))
+
+        # 新版本汇总
         if new_versions:
+            lines.append("")
+            lines.append("GEPA 产出的新版本：")
+            by_role: Dict[str, list] = {}
             for v in new_versions:
-                lines.append(
-                    f"- 策略「{v['skill_name']}」版本 {v['version']}，"
-                    f"对局数 {v['games_played']}，胜率 {v['win_rate']:.0%}"
-                )
-        if state:
-            lines.append(f"GEPA 运行状态: {state}")
+                r = v.get("role", "未知")
+                if r not in by_role:
+                    by_role[r] = []
+                by_role[r].append(v)
+            for role, vers in by_role.items():
+                names = [f"{v['version']}（胜率 {v['win_rate']:.0%}）" for v in vers]
+                lines.append(f"  - {role}：{', '.join(names)}")
+
         return "\n".join(lines)
 
     def _format_game_stats(self, data: Dict) -> str:
