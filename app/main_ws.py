@@ -1026,7 +1026,8 @@ def _create_http_app():
     app.router.add_post("/evolution/skills/{skill_name}/rollback", _evo_rollback)
     app.router.add_post("/evolution/skills/{skill_name}/pin", _evo_pin)
     app.router.add_get("/evolution/buffer", _evo_buffer)
-    app.router.add_post("/evolution/buffer/process-pending", _evo_process_pending)
+    app.router.add_post("/evolution/buffer/cluster-pending", _evo_cluster_pending)
+    app.router.add_post("/evolution/buffer/confirm-clusters", _evo_confirm_clusters)
     app.router.add_get("/evolution/buffer/clusters/{cluster_id}", _evo_cluster_detail)
     app.router.add_post("/evolution/buffer/clusters/{cluster_id}/force-confirm", _evo_force_confirm)
     app.router.add_get("/evolution/skills/{skill_name}/versions/{version}/content", _evo_version_content)
@@ -1243,38 +1244,43 @@ async def _evo_buffer(request):
         return aiohttp_web.json_response({"detail": str(e)}, status=500)
 
 
-async def _evo_process_pending(request):
-    """手动触发：聚类 pending 建议 + 确认满足条件的 cluster + 清理过期。"""
+async def _evo_cluster_pending(request):
+    """手动触发：将 pending 建议聚类。"""
     try:
         from evolution.config import load_config
         from evolution.buffer_pool import BufferPool
         from evolution.clustering import SuggestionClusterer
+
+        def _do():
+            cfg = load_config()
+            pool = BufferPool(cfg)
+            clusterer = SuggestionClusterer(cfg, pool)
+            clustered = clusterer.process_pending()
+            return {"clustered": len(clustered)}
+
+        result = await asyncio.to_thread(_do)
+        return aiohttp_web.json_response(result)
+    except Exception as e:
+        return aiohttp_web.json_response({"detail": str(e)}, status=500)
+
+
+async def _evo_confirm_clusters(request):
+    """手动触发：确认满足条件的 cluster 为新版本。"""
+    try:
+        from evolution.config import load_config
+        from evolution.buffer_pool import BufferPool
         from evolution.confirmation import ConfirmationJudge
         from evolution.version_manager import VersionManager
 
-        def _do_process():
+        def _do():
             cfg = load_config()
             pool = BufferPool(cfg)
-
-            # 1. 聚类
-            clusterer = SuggestionClusterer(cfg, pool)
-            clustered = clusterer.process_pending()
-
-            # 2. 确认
             vm = VersionManager(cfg)
             judge = ConfirmationJudge(cfg, pool, vm)
             confirmed = judge.check_all_clusters()
+            return {"confirmed": len(confirmed)}
 
-            # 3. 过期清理
-            expired = pool.expire_old_suggestions()
-
-            return {
-                "clustered": len(clustered),
-                "confirmed": len(confirmed),
-                "expired": expired,
-            }
-
-        result = await asyncio.to_thread(_do_process)
+        result = await asyncio.to_thread(_do)
         return aiohttp_web.json_response(result)
     except Exception as e:
         return aiohttp_web.json_response({"detail": str(e)}, status=500)
