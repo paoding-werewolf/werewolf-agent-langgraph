@@ -545,12 +545,15 @@ class EvolutionSummary:
 
     def _persist(self, summary: Dict):
         """将摘要写入 evolution_runtime_state（key = latest_summary）。"""
+        from sqlalchemy.orm.attributes import flag_modified
+
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         session = get_session()
         try:
             record = session.get(EvolutionRuntimeState, "latest_summary")
             if record:
                 record.payload_json = summary
+                flag_modified(record, "payload_json")
                 record.updated_at = now
             else:
                 session.add(EvolutionRuntimeState(

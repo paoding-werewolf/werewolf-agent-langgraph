@@ -350,6 +350,8 @@ class Curator:
 
     def _save_state(self, state: Dict):
         """Merge into existing state and write."""
+        from sqlalchemy.orm.attributes import flag_modified
+
         existing = self._load_state()
         existing.update(state)
         now = datetime.now(timezone.utc).replace(tzinfo=None)
@@ -359,6 +361,7 @@ class Curator:
             record = session.get(EvolutionRuntimeState, "curator")
             if record:
                 record.payload_json = existing
+                flag_modified(record, "payload_json")
                 record.updated_at = now
             else:
                 session.add(EvolutionRuntimeState(state_key="curator", payload_json=existing))

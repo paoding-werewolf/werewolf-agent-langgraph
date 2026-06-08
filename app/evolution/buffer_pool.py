@@ -142,6 +142,8 @@ class BufferPool:
                 item.preview_texts_json = preview_texts
                 item.target_skill_name = data.get("target_skill", "")
                 item.payload_json = data
+                from sqlalchemy.orm.attributes import flag_modified
+                flag_modified(item, "payload_json")
                 item.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
                 logger.info(f"Cluster updated: {cluster_id}, count={len(suggestions)}, causal={data.get('avg_causal_strength', 0):.2f}, consist={data.get('consistency_rate', 0):.2f}")
             else:
@@ -209,6 +211,8 @@ class BufferPool:
                 existing.scene_tags_json = item.scene_tags_json
                 existing.preview_texts_json = item.preview_texts_json
                 existing.payload_json = item.payload_json
+                from sqlalchemy.orm.attributes import flag_modified
+                flag_modified(existing, "payload_json")
                 existing.target_skill_name = item.target_skill_name
                 existing.updated_at = now
                 session.delete(item)
