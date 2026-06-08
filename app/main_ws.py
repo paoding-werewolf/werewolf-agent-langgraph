@@ -1123,7 +1123,7 @@ async def _evo_cluster_pending(request):
 
 
 async def _evo_confirm_clusters(request):
-    """手动触发：确认满足条件的 cluster 为新版本。"""
+    """手动触发：确认满足条件的 cluster 为新版本（异步，立即返回）。"""
     try:
         from evolution.config import load_config
         from evolution.buffer_pool import BufferPool
@@ -1136,10 +1136,10 @@ async def _evo_confirm_clusters(request):
             vm = VersionManager(cfg)
             judge = ConfirmationJudge(cfg, pool, vm)
             confirmed = judge.check_all_clusters()
-            return {"confirmed": len(confirmed)}
+            logger.info(f"Background confirmation done: {len(confirmed)} clusters confirmed")
 
-        result = await asyncio.to_thread(_do)
-        return aiohttp_web.json_response(result)
+        asyncio.create_task(asyncio.to_thread(_do))
+        return aiohttp_web.json_response({"status": "started"})
     except Exception as e:
         return aiohttp_web.json_response({"detail": str(e)}, status=500)
 
