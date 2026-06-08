@@ -894,6 +894,7 @@ def _create_http_app():
     app.router.add_get("/evolution/gaps", _evo_gaps)
     app.router.add_get("/evolution/games", _evo_games)
     app.router.add_get("/evolution/curator/status", _evo_curator_status)
+    app.router.add_post("/evolution/curator/trigger", _evo_curator_trigger)
     app.router.add_post("/evolution/gepa/trigger", _evo_gepa_trigger)
     app.router.add_get("/evolution/gepa/status", _evo_gepa_status)
     app.router.add_post("/evolution/gepa/cancel", _evo_gepa_cancel)
@@ -1441,6 +1442,30 @@ async def _evo_curator_status(request):
         })
     except Exception as e:
         return aiohttp_web.json_response({"detail": str(e)}, status=500)
+
+
+async def _evo_curator_trigger(request):
+    """手动触发策展人立即运行。"""
+    try:
+        from evolution.config import load_config
+        from evolution.curator import Curator
+
+        cfg = load_config()
+        if not cfg.curator.enabled:
+            return aiohttp_web.json_response(
+                {"success": False, "detail": "Curator is disabled in config"},
+                status=400,
+            )
+
+        curator = Curator(cfg)
+        summary = curator.run()
+
+        return aiohttp_web.json_response({
+            "success": True,
+            "summary": summary,
+        })
+    except Exception as e:
+        return aiohttp_web.json_response({"success": False, "detail": str(e)}, status=500)
 
 
 # ── GEPA 离线进化 API ────────────────────────────────────
