@@ -2129,7 +2129,7 @@ async def _evo_curator_status(request):
                 "last_game_end_at": last_game_end_at,
                 "next_run_at": next_run_at,
                 "is_overdue": is_overdue,
-                "running": _curator_task is not None and not _curator_task.done(),
+                "running": payload.get("running", False),
             },
         })
     except Exception as e:

@@ -67,33 +67,39 @@ class Curator:
     def run(self) -> Dict:
         """执行 Curator 审查。返回操作摘要。"""
         logger.info("[Curator] ========== 开始策展人运行 ==========")
+        self._save_state({"running": True})
         summary = {"phase1": {}, "phase2": {}}
 
-        logger.info("[Curator] 阶段一：确定性状态转移")
-        summary["phase1"] = self._phase1_state_transitions()
-        p1 = summary["phase1"]
-        logger.info(f"[Curator] 阶段一结果: staled={len(p1.get('staled', []))}, archived={len(p1.get('archived', []))}")
-        if p1.get("staled"):
-            for s in p1["staled"]:
-                logger.info(f"  [Curator] active→stale: {s}")
-        if p1.get("archived"):
-            for s in p1["archived"]:
-                logger.info(f"  [Curator] stale→archived: {s}")
+        try:
+            logger.info("[Curator] 阶段一：确定性状态转移")
+            summary["phase1"] = self._phase1_state_transitions()
+            p1 = summary["phase1"]
+            logger.info(f"[Curator] 阶段一结果: staled={len(p1.get('staled', []))}, archived={len(p1.get('archived', []))}")
+            if p1.get("staled"):
+                for s in p1["staled"]:
+                    logger.info(f"  [Curator] active→stale: {s}")
+            if p1.get("archived"):
+                for s in p1["archived"]:
+                    logger.info(f"  [Curator] stale→archived: {s}")
 
-        logger.info("[Curator] 阶段二：LLM 审查")
-        summary["phase2"] = self._phase2_llm_review()
-        p2 = summary["phase2"]
-        logger.info(f"[Curator] 阶段二结果: reviewed={p2.get('reviewed', 0)}, kept={p2.get('kept', 0)}, patched={p2.get('patched', 0)}, consolidated={p2.get('consolidated', 0)}, archived={p2.get('archived', 0)}")
+            logger.info("[Curator] 阶段二：LLM 审查")
+            summary["phase2"] = self._phase2_llm_review()
+            p2 = summary["phase2"]
+            logger.info(f"[Curator] 阶段二结果: reviewed={p2.get('reviewed', 0)}, kept={p2.get('kept', 0)}, patched={p2.get('patched', 0)}, consolidated={p2.get('consolidated', 0)}, archived={p2.get('archived', 0)}")
 
-        confirmed, games = self._current_counts()
-        self._save_state({
-            "last_run_at": datetime.now(timezone.utc).isoformat(),
-            "last_confirmed_count": confirmed,
-            "last_total_games": games,
-        })
-        logger.info(f"[Curator] 策展完成: confirmed={confirmed}, total_games={games}")
-        logger.info("[Curator] ========== 策展人运行结束 ==========")
-        return summary
+            confirmed, games = self._current_counts()
+            self._save_state({
+                "last_run_at": datetime.now(timezone.utc).isoformat(),
+                "last_confirmed_count": confirmed,
+                "last_total_games": games,
+                "running": False,
+            })
+            logger.info(f"[Curator] 策展完成: confirmed={confirmed}, total_games={games}")
+            logger.info("[Curator] ========== 策展人运行结束 ==========")
+            return summary
+        except Exception:
+            self._save_state({"running": False})
+            raise
 
     def _phase1_state_transitions(self) -> Dict:
         """确定性状态转移：active → stale → archived。"""
