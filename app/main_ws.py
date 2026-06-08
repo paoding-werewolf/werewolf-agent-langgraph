@@ -742,7 +742,7 @@ async def _curator_monitor_loop(interval: float):
             else:
                 curator = Curator(cfg)
                 if curator.should_run(is_game_in_progress=False):
-                    summary = curator.run()
+                    summary = await asyncio.to_thread(curator.run)
                     logger.info(f"Curator monitor triggered: {summary}")
         except Exception:
             logger.exception("Curator monitor check failed")
@@ -1661,7 +1661,7 @@ async def _evo_overview(request):
         from evolution.config import load_config
         from evolution.buffer_pool import BufferPool
         from evolution.db import get_session
-        from evolution.models import EvolutionSkill, EvolutionRuntimeState, ConjugateAgentParticipation
+        from evolution.models import EvolutionSkill, EvolutionRuntimeState, EvolutionGameArchive
         from sqlalchemy import func
 
         cfg = load_config()
@@ -1671,7 +1671,7 @@ async def _evo_overview(request):
         session = get_session()
         try:
             skill_count = session.query(func.count(EvolutionSkill.id)).scalar() or 0
-            total_games = session.query(func.count(ConjugateAgentParticipation.id)).scalar() or 0
+            total_games = session.query(func.count(EvolutionGameArchive.id)).scalar() or 0
             curator_record = session.get(EvolutionRuntimeState, "curator")
             curator_last_run = (curator_record.payload_json or {}).get("last_run_at") if curator_record else None
         finally:
