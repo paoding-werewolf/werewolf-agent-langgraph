@@ -169,11 +169,23 @@ class GEPA:
             parent = random.choice(population)
             population.append(self._clone_individual(parent))
 
-        # 截断到 population_size
-        population = population[:gepa_cfg.population_size]
+        # 角色均衡截断到 population_size
+        population = self._balanced_select(population, gepa_cfg.population_size)
+        # 均衡截断后若不足（角色数 < population_size），再补齐
+        while len(population) < gepa_cfg.population_size:
+            parent = random.choice(population)
+            population.append(self._clone_individual(parent))
+
+        # 记录种群角色分布
+        role_counts = {}
+        for ind in population:
+            r = ind.get("role", "unknown")
+            role_counts[r] = role_counts.get(r, 0) + 1
+        role_dist = ", ".join(f"{r}:{c}" for r, c in sorted(role_counts.items()))
 
         logger.info(
-            f"GEPA: 启动进化，种群={len(population)}，代数={gepa_cfg.num_generations}"
+            f"GEPA: 启动进化，种群={len(population)}，代数={gepa_cfg.num_generations}，"
+            f"角色分布=[{role_dist}]"
         )
 
         for gen in range(1, gepa_cfg.num_generations + 1):
@@ -872,6 +884,85 @@ class GEPA:
             return None
 
     # ── 辅助方法 ──────────────────────────────────────────────
+
+    _STATUS_PRIORITY = {"active": 0, "stale": 1, "superseded": 2, "candidate": 3}
+
+    @staticmethod
+    def _balanced_select(individuals: List[Dict[str, Any]], size: int) -> List[Dict[str, Any]]:
+        """角色均衡采样：确保每个角色至少1个代表，剩余名额轮询分配。
+
+        组内排序：状态优先级 active > stale > superseded > candidate，
+        同状态按 win_rate 降序。
+        """
+        if size <= 0 or not individuals:
+            return []
+
+        from collections import defaultdict
+
+        # 按角色分组
+        by_role: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        for ind in individuals:
+            by_role[ind.get("role", "common")].append(ind)
+
+        # 每组内部排序
+        status_priority = GEPA._STATUS_PRIORITY
+        for role in by_role:
+            by_role[role].sort(
+                key=lambda x: (
+                    status_priority.get(x.get("status", "candidate"), 9),
+                    -(x.get("win_rate", 0.0) or 0.0),
+                )
+            )
+
+        # 按各角色最优版本的 win_rate 对角色排序（有实战数据的角色优先）
+        role_order = sorted(
+            by_role.keys(),
+            key=lambda r: -(
+                by_role[r][0].get("win_rate", 0.0) or 0.0
+            ),
+        )
+
+        result: List[Dict[str, Any]] = []
+        used_keys: set = set()
+
+        # 第一轮：每角色取1个代表（角色数 > size 时只取前 size 个角色）
+        for role in role_order[:size]:
+            best = by_role[role][0]
+            result.append(best)
+            used_keys.add(best["key"])
+
+        if len(result) >= size:
+            return result[:size]
+
+        # 第二轮：剩余名额轮询分配
+        # 为每个角色维护一个取值指针
+        role_indices: Dict[str, int] = {r: 0 for r in role_order}
+        # 跳过第一轮已取的
+        for r in role_order:
+            if by_role[r][0]["key"] in used_keys:
+                role_indices[r] = 1
+
+        remaining = size - len(result)
+        while remaining > 0:
+            added = False
+            for role in role_order:
+                if remaining <= 0:
+                    break
+                idx = role_indices.get(role, 0)
+                pool = by_role[role]
+                while idx < len(pool) and pool[idx]["key"] in used_keys:
+                    idx += 1
+                role_indices[role] = idx
+                if idx < len(pool):
+                    result.append(pool[idx])
+                    used_keys.add(pool[idx]["key"])
+                    role_indices[role] = idx + 1
+                    remaining -= 1
+                    added = True
+            if not added:
+                break
+
+        return result[:size]
 
     @staticmethod
     def _clone_individual(ind: Dict[str, Any]) -> Dict[str, Any]:
