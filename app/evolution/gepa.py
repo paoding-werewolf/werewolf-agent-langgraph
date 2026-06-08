@@ -39,6 +39,17 @@ FITNESS_DIMENSIONS = ["win_rate", "consistency", "deception", "info_utilization"
 
 # ── GEPA 主类 ──────────────────────────────────────────────────
 
+GEPA_STEPS = [
+    ("initializing", "初始化种群"),
+    ("evaluating_fitness", "适应度评估"),
+    ("pareto_selection", "Pareto 前沿选择"),
+    ("mutating", "LLM 诊断+变异"),
+    ("crossing_over", "LLM 交叉"),
+    ("creating_versions", "创建新版本"),
+    ("saving_state", "保存状态"),
+]
+
+
 class GEPA:
     """Genetic-Pareto Prompt Evolution 离线进化引擎。"""
 
@@ -68,6 +79,7 @@ class GEPA:
         initial_state = {
             "status": "running",
             "current_generation": 0,
+            "current_step": "initializing",
             "total_generations": self.gepa_cfg.num_generations,
             "population_size": self.gepa_cfg.population_size,
             "started_at": now,
@@ -90,6 +102,7 @@ class GEPA:
             return {
                 "status": "idle",
                 "current_generation": 0,
+                "current_step": None,
                 "total_generations": self.gepa_cfg.num_generations,
                 "population_size": self.gepa_cfg.population_size,
                 "started_at": None,
@@ -144,6 +157,7 @@ class GEPA:
         self._cancel_flag = False
 
         # ── 初始化种群 ────────────────────────────────────────
+        self._update_step("initializing")
         population = self._initialize_population()
         if not population:
             logger.warning("GEPA: 种群为空，退出")
@@ -170,12 +184,15 @@ class GEPA:
             logger.info(f"GEPA: 开始第 {gen}/{gepa_cfg.num_generations} 代")
 
             # ── 评估适应度 ─────────────────────────────────────
+            self._update_step("evaluating_fitness", gen)
             fitness_results = self._evaluate_fitness(population)
 
             # ── Pareto 前沿选择 ────────────────────────────────
+            self._update_step("pareto_selection", gen)
             pareto_front = self._pareto_front(fitness_results)
 
             # ── LLM 诊断 + 变异 ───────────────────────────────
+            self._update_step("mutating", gen)
             mutations = 0
             new_individuals = []
             for ind in population:
@@ -190,6 +207,7 @@ class GEPA:
                         mutations += 1
 
             # ── 交叉 ──────────────────────────────────────────
+            self._update_step("crossing_over", gen)
             crossovers = 0
             if len(pareto_front) >= 2:
                 # 在 Pareto 前沿个体之间做交叉
@@ -208,6 +226,7 @@ class GEPA:
                         crossovers += 1
 
             # ── 创建新版本（变异/交叉策略入库）──────────────────
+            self._update_step("creating_versions", gen)
             new_versions = []
             for ind in new_individuals:
                 version_name = self.loader.create_new_version(
@@ -263,6 +282,7 @@ class GEPA:
             }
 
             # ── 持久化状态 ─────────────────────────────────────
+            self._update_step("saving_state", gen)
             latest_results = {
                 "generation": gen,
                 "best_fitness": best_fitness,
@@ -885,6 +905,16 @@ class GEPA:
 
     # ── 状态持久化 ────────────────────────────────────────────
 
+    def _update_step(self, step: str, generation: Optional[int] = None):
+        """更新 GEPA 状态中的 current_step 字段（轻量写入，只改 current_step）。"""
+        state = self._load_state()
+        state["current_step"] = step
+        if generation is not None:
+            state["current_generation"] = generation
+        state["updated_at"] = datetime.now(timezone.utc).isoformat()
+        self._save_state(state)
+        logger.debug(f"GEPA step: {step} (gen={generation})")
+
     def _load_state(self) -> Dict[str, Any]:
         """从数据库加载 GEPA 状态。"""
         session = get_session()
@@ -921,6 +951,7 @@ class GEPA:
         state = self._load_state()
         now = datetime.now(timezone.utc).isoformat()
         state["status"] = status
+        state["current_step"] = None
         state["completed_at"] = now
         state["updated_at"] = now
         if latest_results:
