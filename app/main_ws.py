@@ -1133,16 +1133,6 @@ async def _evo_confirm_clusters(request):
         def _do():
             cfg = load_config()
             pool = BufferPool(cfg)
-            # Fix clusters with empty target_skill before judging
-            for cid in pool.list_clusters():
-                cluster = pool.load_cluster(cid)
-                if cluster and not cluster.get("target_skill"):
-                    suggestions = cluster.get("suggestions", [])
-                    if suggestions:
-                        ts = suggestions[0].get("suggestion", {}).get("target_skill", "")
-                        if ts:
-                            cluster["target_skill"] = ts
-                            pool.save_cluster(cid, cluster)
             vm = VersionManager(cfg)
             judge = ConfirmationJudge(cfg, pool, vm)
             confirmed = judge.check_all_clusters()
