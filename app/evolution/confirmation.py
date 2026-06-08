@@ -140,11 +140,17 @@ class ConfirmationJudge:
         logger.info(f"Executing confirmation: cluster={cluster_id}, target_skill={target_skill}, suggestions={len(suggestions)}")
         new_content = self._synthesize_strategy(suggestions, target_skill)
 
+        scene_role = (cluster.get("scene_tags") or {}).get("role", "")
+        # Normalize sub-roles like wolf_king → wolf, villager_oracle → villager
+        if "_" in scene_role:
+            scene_role = scene_role.split("_")[0]
+
         self.version_manager.create_new_version(
             skill_name=target_skill,
             content=new_content,
             source="debounced_update",
             trigger_cluster=cluster_id,
+            role=scene_role,
         )
 
         self.buffer_pool.move_to_confirmed(cluster_id)

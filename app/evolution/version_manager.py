@@ -17,8 +17,9 @@ class VersionManager:
 
     def create_new_version(self, skill_name: str, content: str,
                            source: str = "debounced_update",
-                           trigger_cluster: str = "") -> str:
-        return self.loader.create_new_version(skill_name, content, source, trigger_cluster)
+                           trigger_cluster: str = "",
+                           role: str = "") -> str:
+        return self.loader.create_new_version(skill_name, content, source, trigger_cluster, role)
 
     def rollback(self, skill_name: str, target_version: str) -> bool:
         return self.loader.rollback(skill_name, target_version)

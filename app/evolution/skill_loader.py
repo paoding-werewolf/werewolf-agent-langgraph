@@ -243,13 +243,15 @@ class SkillLoader:
 
     def create_new_version(self, skill_name: str, content: str,
                            source: str = "debounced_update",
-                           trigger_cluster: str = "") -> str:
+                           trigger_cluster: str = "",
+                           role: str = "") -> str:
         """创建策略新版本，返回版本号（如 "v3"）。"""
         session = get_session()
         try:
             skill = session.query(EvolutionSkill).filter_by(skill_name=skill_name).first()
             if not skill:
-                role = skill_name.split("-", 1)[0] if "-" in skill_name else "common"
+                if not role:
+                    role = skill_name.split("-", 1)[0] if "-" in skill_name else "common"
                 skill = EvolutionSkill(
                     skill_name=skill_name,
                     role=role,

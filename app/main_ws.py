@@ -1183,7 +1183,13 @@ async def _evo_force_confirm(request):
             vm = VersionManager(cfg)
             judge = ConfirmationJudge(cfg, pool, vm)
             new_content = judge._synthesize_strategy(suggestions, target_skill)
-            version_name = vm.create_new_version(target_skill, new_content, "manual_force_confirm", cluster_id)
+            scene_role = (cluster.get("scene_tags") or {}).get("role", "")
+            if "_" in scene_role:
+                scene_role = scene_role.split("_")[0]
+            version_name = vm.create_new_version(
+                target_skill, new_content, "manual_force_confirm", cluster_id,
+                role=scene_role,
+            )
             pool.move_to_confirmed(cluster_id)
             return {"success": True, "cluster_id": cluster_id, "skill_name": target_skill, "new_version": version_name}, None, 200
 
