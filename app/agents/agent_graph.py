@@ -498,6 +498,39 @@ async def _decide_election(state: AgentState) -> AgentState:
     return {**state, "next_action": action}
 
 
+def _inject_sheriff_vote_call(task_guidance: str, state: AgentState) -> str:
+    """提取警长在本轮讨论中的归票发言，注入投票 prompt。"""
+    sheriff_id = state.get("sheriff")
+    if not sheriff_id:
+        return task_guidance
+
+    wm_data = state.get("working_memory")
+    if not wm_data:
+        return task_guidance
+
+    from memory.working_memory import WorkingMemory
+    wm = WorkingMemory.from_dict(wm_data)
+    current_day = state.get("day", 1)
+
+    for s in reversed(wm.speeches):
+        if s.speaker == sheriff_id and s.day == current_day and s.phase == "discussion":
+            # 截断过长的发言，避免 token 浪费
+            speech_text = s.raw
+            if len(speech_text) > 800:
+                speech_text = speech_text[:800] + "…[截断]"
+            task_guidance += f"""
+[警长归票]
+警长（{sheriff_id}号）在本轮讨论中的发言：
+"{speech_text}"
+
+请根据你的身份、信息和推理，独立判断是否跟随警长的归票方向。
+你可以跟票、投其他玩家、或弃权。
+"""
+            break
+
+    return task_guidance
+
+
 async def _decide_discussion(state: AgentState) -> AgentState:
     """白天讨论：发言和分析。"""
     builder = PromptBuilder(Role(state["my_role"]), state["me_id"])
@@ -524,6 +557,18 @@ async def _decide_discussion(state: AgentState) -> AgentState:
 - 使用 speak 工具进行发言
 - 如果没有有用的内容可补充，使用 pass_turn
 """
+
+    # ── 警长归票引导 ──
+    if state["me_id"] == state.get("sheriff"):
+        task_guidance += """
+[归票义务]
+你是警长，也是本轮最后一个发言者。请在发言末尾给出明确的归票方向：
+- 建议今天投票放逐哪位玩家
+- 给出归票理由（基于场上信息、逻辑推理或身份判断）
+- 格式示例：「我建议今天投票放逐X号，理由是...」
+- 如果你无法确定方向，诚实说明但不回避归票责任——不归票对好人阵营没有帮助
+"""
+
     final_instr = "进行你的发言。"
 
     full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, state["last_thought"], extra_data=_build_prompt_extra_data(state))
@@ -564,6 +609,10 @@ async def _decide_vote(state: AgentState) -> AgentState:
 - 狼人：保护你的队友，必要时可出卖队友
 - 村民：跟随你最信任的玩家
 """
+
+    # ── 提取警长归票方向 ──
+    task_guidance = _inject_sheriff_vote_call(task_guidance, state)
+
     final_instr = "使用 vote 工具进行投票（或使用 pass_turn 弃权）。"
 
     full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, state["last_thought"], extra_data=_build_prompt_extra_data(state))
