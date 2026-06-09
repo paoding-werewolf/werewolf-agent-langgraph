@@ -475,7 +475,7 @@ def build_agent_identity_prompt(facts: dict[str, Any]) -> str:
         f"{json.dumps(facts.get('existing_agent_names') or [], ensure_ascii=False)}\n\n"
         "请生成 JSON，格式如下：\n\n"
         "{\n"
-        '  "agent_name": "2到6个中文字符。不延续先前命名风格。根据主要进化的角色来更换取名方向。",\n'
+        '  "agent_name": "随机2或3个中文字符。不延续先前命名风格。根据主要进化的角色来更换取名方向。",\n'
         '  "changelog": "120到220字。技术变更描述，说明本次 skill 从旧版本到新版本的核心策略变化、行为倾向变化、可能影响的对局阶段。不要泛泛而谈。",\n'
         '  "lore": "200到300字。3A 游戏角色介绍风格，讲述名字来源、人格特质、命运轨迹，并用隐喻呼应本次技术进化。可体现与前代 Agent 的血脉连续性。"\n'
         "}\n"
