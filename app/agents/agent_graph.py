@@ -187,6 +187,8 @@ async def _reflect_node(state: AgentState) -> AgentState:
         f"{state['phase']}_reflect",
         "你是一名狼人杀逻辑大师。专注于推理。",
         full_prompt,
+        state.get("session_id", ""),
+        state.get("external_agent_id", ""),
     )
 
     update = {"last_thought": reflection}
@@ -265,6 +267,8 @@ async def _decide_night_role(state: AgentState) -> AgentState:
         state["me_id"], f"{state['phase']}_act",
         "你是一名果断的狼人杀玩家。使用提供的工具。",
         full_prompt,
+        state.get("session_id", ""),
+        state.get("external_agent_id", ""),
     )
 
     return {**state, "next_action": action}
@@ -300,6 +304,8 @@ async def _decide_wolf_gesture(state: AgentState) -> AgentState:
         state["me_id"], f"{state['phase']}_act",
         "你是狼人阵营的玩家。使用工具进行交流并执行行动。",
         full_prompt,
+        state.get("session_id", ""),
+        state.get("external_agent_id", ""),
     )
 
     return {**state, "next_action": action}
@@ -333,6 +339,8 @@ async def _decide_election(state: AgentState) -> AgentState:
         state["me_id"], f"{state['phase']}_act",
         "你是狼人杀玩家。使用可用工具决定你的竞选行动。",
         full_prompt,
+        state.get("session_id", ""),
+        state.get("external_agent_id", ""),
     )
 
     return {**state, "next_action": action}
@@ -372,6 +380,8 @@ async def _decide_discussion(state: AgentState) -> AgentState:
         state["me_id"], f"{state['phase']}_act",
         "你是处于白天讨论阶段的狼人杀玩家。使用 speak 或 pass_turn。",
         full_prompt,
+        state.get("session_id", ""),
+        state.get("external_agent_id", ""),
     )
 
     return {**state, "next_action": action}
@@ -410,6 +420,8 @@ async def _decide_vote(state: AgentState) -> AgentState:
         state["me_id"], f"{state['phase']}_act",
         "你是正在进行放逐投票的狼人杀玩家。使用 vote 或 pass_turn。",
         full_prompt,
+        state.get("session_id", ""),
+        state.get("external_agent_id", ""),
     )
 
     return {**state, "next_action": action}
@@ -447,6 +459,8 @@ async def _decide_shoot(state: AgentState) -> AgentState:
         state["me_id"], f"{state['phase']}_act",
         "你正在使用开枪技能。使用 shoot 或 pass_turn。",
         full_prompt,
+        state.get("session_id", ""),
+        state.get("external_agent_id", ""),
     )
 
     return {**state, "next_action": action}
@@ -487,6 +501,8 @@ async def _decide_generic(state: AgentState) -> AgentState:
         state["me_id"], f"{state['phase']}_act",
         "你是狼人杀玩家。使用可用工具。",
         full_prompt,
+        state.get("session_id", ""),
+        state.get("external_agent_id", ""),
     )
 
     return {**state, "next_action": action}

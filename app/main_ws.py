@@ -407,6 +407,16 @@ async def process_request(connection: ServerConnection, request: Request):
       GET /debug/view    -> HTML prompt debugger
     """
     parts = urlsplit(request.path)
+
+    # /debug/prompts/by-agent/{external_agent_id} — 按 Agent 视角查询
+    if parts.path.startswith("/debug/prompts/by-agent/"):
+        external_agent_id = parts.path.split("/debug/prompts/by-agent/")[-1]
+        from urllib.parse import unquote
+        external_agent_id = unquote(external_agent_id)
+        history = prompt_logger.get_history_by_external_agent(external_agent_id)
+        body = json.dumps(history, ensure_ascii=False)
+        return _http_response(http.HTTPStatus.OK, body, "application/json; charset=utf-8")
+
     if parts.path not in ("/debug/prompts", "/debug/view"):
         return None
 

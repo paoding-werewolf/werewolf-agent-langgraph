@@ -167,21 +167,21 @@ class LLMCaller:
 
     async def decide_with_tools(self, agent_id: str, phase: str,
                                 system_prompt: str, user_msg: str,
-                                session_id: str = "") -> Optional[Dict[str, Any]]:
+                                session_id: str = "", external_agent_id: str = "") -> Optional[Dict[str, Any]]:
         try:
             message = await self._chat_with_tools(system_prompt, user_msg)
         except Exception as e:
             err = f"ERROR: {str(e)}"
-            prompt_logger.log(agent_id, phase, system_prompt, user_msg, err, session_id)
+            prompt_logger.log(agent_id, phase, system_prompt, user_msg, err, session_id, external_agent_id)
             return {"result": err, "target": "all", "extra": {}}
-        return self._process_tool_response(agent_id, phase, system_prompt, user_msg, message, session_id)
+        return self._process_tool_response(agent_id, phase, system_prompt, user_msg, message, session_id, external_agent_id)
 
     # Keep backward-compatible alias
     decide_with_tools_sync = decide_with_tools
 
     def _process_tool_response(self, agent_id: str, phase: str,
                                system_prompt: str, user_msg: str, message,
-                               session_id: str = "") -> Optional[Dict[str, Any]]:
+                               session_id: str = "", external_agent_id: str = "") -> Optional[Dict[str, Any]]:
         content = message.content or ""
         tool_calls = message.tool_calls or []
 
@@ -192,7 +192,7 @@ class LLMCaller:
                 for tc in tool_calls
             ]
             full_response += "\n[TOOL_CALLS] " + json.dumps(serialized, ensure_ascii=False)
-        prompt_logger.log(agent_id, phase, system_prompt, user_msg, full_response, session_id)
+        prompt_logger.log(agent_id, phase, system_prompt, user_msg, full_response, session_id, external_agent_id)
 
         if tool_calls:
             tc = tool_calls[0]
@@ -216,7 +216,7 @@ class LLMCaller:
 
     async def call_with_log(self, agent_id: str, phase: str,
                             system_prompt: str, user_msg: str,
-                            session_id: str = "") -> str:
+                            session_id: str = "", external_agent_id: str = "") -> str:
         """Async LLM call that logs the prompt and returns the content."""
         try:
             resp = await self.async_client.chat.completions.create(
@@ -231,7 +231,7 @@ class LLMCaller:
         except Exception as e:
             content = f"ERROR: {str(e)}"
 
-        prompt_logger.log(agent_id, phase, system_prompt, user_msg, content, session_id)
+        prompt_logger.log(agent_id, phase, system_prompt, user_msg, content, session_id, external_agent_id)
         return content
 
     # Keep backward-compatible alias

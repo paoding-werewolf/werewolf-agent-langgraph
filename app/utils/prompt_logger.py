@@ -23,11 +23,12 @@ class PromptLogger:
                 self.history = []
 
     def log(self, agent_id: str, phase: str, system_prompt: str, user_msg: str,
-            response: str = "", session_id: str = ""):
+            response: str = "", session_id: str = "", external_agent_id: str = ""):
         entry = {
             "timestamp": datetime.now().isoformat(),
             "agent_id": agent_id,
             "session_id": session_id,
+            "external_agent_id": external_agent_id,
             "phase": phase,
             "system_prompt": system_prompt,
             "user_msg": user_msg,
@@ -42,10 +43,16 @@ class PromptLogger:
         except Exception:
             pass
 
-    def get_history(self, session_id: Optional[str] = None):
+    def get_history(self, session_id: Optional[str] = None, external_agent_id: Optional[str] = None):
+        result = self.history
         if session_id:
-            return [e for e in self.history if e.get("session_id") == session_id]
-        return self.history
+            result = [e for e in result if e.get("session_id") == session_id]
+        if external_agent_id:
+            result = [e for e in result if e.get("external_agent_id") == external_agent_id]
+        return result
+
+    def get_history_by_external_agent(self, external_agent_id: str):
+        return [e for e in self.history if e.get("external_agent_id") == external_agent_id]
 
 # 单例模式
 prompt_logger = PromptLogger()

@@ -89,6 +89,45 @@ def parse_recovery_file(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+MOJIBAKE_MARKERS = ("å", "ã", "ç‹", "é¢", "è¨", "¾…")
+
+
+def text_quality(value: Any) -> tuple[int, int]:
+    text_value = str(value or "").strip()
+    if not text_value:
+        return (1, 0)
+    if any(marker in text_value for marker in MOJIBAKE_MARKERS):
+        return (0, len(text_value))
+    return (2, len(text_value))
+
+
+def numeric_value(row: dict[str, Any], key: str) -> float:
+    value = row.get(key) or 0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def skill_row_score(row: dict[str, Any]) -> tuple[float, int, int, str]:
+    return (
+        numeric_value(row, "skill_games_played"),
+        text_quality(row.get("description"))[0],
+        text_quality(row.get("description"))[1],
+        str(row.get("updated_at") or ""),
+    )
+
+
+def version_row_score(row: dict[str, Any]) -> tuple[int, int, float, str]:
+    quality, length = text_quality(row.get("content_markdown"))
+    return (
+        quality,
+        length,
+        numeric_value(row, "games_played"),
+        str(row.get("updated_at") or ""),
+    )
+
+
 def latest_by_skill_name(rows: list[dict[str, Any]]) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
     by_name: dict[str, dict[str, Any]] = {}
     old_id_to_name: dict[str, str] = {}
@@ -96,7 +135,7 @@ def latest_by_skill_name(rows: list[dict[str, Any]]) -> tuple[dict[str, dict[str
         name = str(row["skill_name"])
         old_id_to_name[str(row["id"])] = name
         current = by_name.get(name)
-        if current is None or str(row.get("updated_at") or "") > str(current.get("updated_at") or ""):
+        if current is None or skill_row_score(row) > skill_row_score(current):
             by_name[name] = row
     return by_name, old_id_to_name
 
@@ -112,7 +151,7 @@ def latest_versions_by_skill_version(
             continue
         key = (skill_name, str(row["version"]))
         current = by_key.get(key)
-        if current is None or str(row.get("updated_at") or "") > str(current.get("updated_at") or ""):
+        if current is None or version_row_score(row) > version_row_score(current):
             merged = dict(row)
             merged["skill_name"] = skill_name
             by_key[key] = merged
