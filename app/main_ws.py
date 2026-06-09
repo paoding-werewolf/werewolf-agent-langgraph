@@ -97,6 +97,20 @@ def _strategy_role(role: str) -> str:
     return "wolf" if role in {"wolf", "wolf_king"} else role
 
 
+def _conjugate_lineage_indices(agents: list) -> dict[int, int]:
+    """按共轭体创建顺序生成从 1 开始的展示序号。"""
+    return {
+        agent.id: idx
+        for idx, agent in enumerate(sorted(agents, key=lambda item: item.id), start=1)
+    }
+
+
+def _conjugate_display_name(agent_name: str, lineage_index: int | None) -> str:
+    if not lineage_index:
+        return agent_name
+    return f"{lineage_index:03d}{agent_name}"
+
+
 def _build_versions_used(role: str, external_agent_id: str | None = None) -> dict:
     """为一局游戏生成实际 skill-version 映射。
 
@@ -164,11 +178,31 @@ def _list_provider_agents() -> list[dict]:
 
     latest_id = agents[0].id if agents else None
     latest_agent = agents[0] if agents else None
+    lineage_indices = _conjugate_lineage_indices(agents)
+
+    def agent_identity(agent):
+        base_name = agent.agent_name
+        lineage_index = lineage_indices.get(agent.id)
+        lineage_serial = f"{lineage_index:03d}" if lineage_index else ""
+        display_name = _conjugate_display_name(base_name, lineage_index)
+        return base_name, lineage_index, lineage_serial, display_name
 
     # 固定 ID 条目：始终指向最新进化体
+    latest_base_name = "LatestEvolution"
+    latest_lineage_index = None
+    latest_lineage_serial = ""
+    latest_display_name = latest_base_name
+    if latest_agent:
+        (
+            latest_base_name,
+            latest_lineage_index,
+            latest_lineage_serial,
+            latest_display_name,
+        ) = agent_identity(latest_agent)
+
     latest_entry = {
         "external_agent_id": "latest:evolution",
-        "agent_name": latest_agent.agent_name if latest_agent else "LatestEvolution",
+        "agent_name": latest_display_name,
         "client_type": "ws",
         "client_url": ws_base,
         "model_name": "werewolf-agent-langgraph",
@@ -181,6 +215,10 @@ def _list_provider_agents() -> list[dict]:
             "fingerprint": latest_agent.fingerprint if latest_agent else "",
             "born_at": latest_agent.born_at.isoformat() if latest_agent and latest_agent.born_at else "",
             "avatar_seed": latest_agent.avatar_seed if latest_agent else "",
+            "base_agent_name": latest_base_name,
+            "display_name": latest_display_name,
+            "lineage_index": latest_lineage_index,
+            "lineage_serial": latest_lineage_serial,
             "skill_versions": latest_agent.skill_versions_json or {} if latest_agent else {},
             "skill_count": len(latest_agent.skill_versions_json or {}) if latest_agent else 0,
             "changelog": latest_agent.changelog if latest_agent else "",
@@ -188,10 +226,12 @@ def _list_provider_agents() -> list[dict]:
         },
     }
 
-    conjugate_entries = [
-        {
+    conjugate_entries = []
+    for agent in agents:
+        base_name, lineage_index, lineage_serial, display_name = agent_identity(agent)
+        conjugate_entries.append({
             "external_agent_id": f"agent:{agent.id}",
-            "agent_name": agent.agent_name,
+            "agent_name": display_name,
             "client_type": "ws",
             "client_url": ws_base,
             "model_name": "werewolf-agent-langgraph",
@@ -203,15 +243,17 @@ def _list_provider_agents() -> list[dict]:
                 "fingerprint": agent.fingerprint,
                 "born_at": agent.born_at.isoformat() if agent.born_at else "",
                 "avatar_seed": agent.avatar_seed,
+                "base_agent_name": base_name,
+                "display_name": display_name,
+                "lineage_index": lineage_index,
+                "lineage_serial": lineage_serial,
                 "is_latest": agent.id == latest_id,
                 "skill_versions": agent.skill_versions_json or {},
                 "skill_count": len(agent.skill_versions_json or {}),
                 "changelog": agent.changelog,
                 "lore": agent.lore,
             },
-        }
-        for agent in agents
-    ]
+        })
 
     return [latest_entry] + conjugate_entries
 

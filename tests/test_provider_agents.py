@@ -207,7 +207,11 @@ def test_initial_conjugate_agent_identity_comes_from_llm(monkeypatch):
     monkeypatch.setattr("evolution.conjugate_agent.generate_agent_identity", fake_identity)
     agent = _list_provider_agents()[0]
 
-    assert agent["agent_name"] == "影刃"
+    assert agent["agent_name"] == "001影刃"
+    assert agent["metadata"]["base_agent_name"] == "影刃"
+    assert agent["metadata"]["display_name"] == "001影刃"
+    assert agent["metadata"]["lineage_index"] == 1
+    assert agent["metadata"]["lineage_serial"] == "001"
     assert "初代共轭快照" in agent["metadata"]["changelog"]
     assert "第一夜之前醒来" in agent["metadata"]["lore"]
 
@@ -252,7 +256,8 @@ def test_backfill_legacy_identity(monkeypatch):
 
     agent = _list_provider_agents()[0]
 
-    assert agent["agent_name"] == "夜裁"
+    assert agent["agent_name"] == "001夜裁"
+    assert agent["metadata"]["base_agent_name"] == "夜裁"
     assert "旧初代快照" in agent["metadata"]["changelog"]
     assert "旧档案中苏醒" in agent["metadata"]["lore"]
 
@@ -305,7 +310,8 @@ def test_legacy_identity_backfill_fallback_does_not_retry(monkeypatch):
     second = _list_provider_agents()[0]
 
     assert calls["count"] == 1
-    assert first["agent_name"] == "影刃-初纪"
+    assert first["agent_name"] == "001影刃-初纪"
+    assert first["metadata"]["base_agent_name"] == "影刃-初纪"
     assert first["metadata"]["lore"]
     assert second["metadata"]["lore"] == first["metadata"]["lore"]
 
@@ -351,12 +357,21 @@ def test_list_provider_agents_exposes_initial_conjugate_snapshot():
     assert fixed["external_agent_id"] == "latest:evolution"
     assert fixed["metadata"]["mode"] == "latest-evolution"
     assert fixed["metadata"]["is_latest"] is True
+    assert fixed["agent_name"] == "001影刃-初纪"
+    assert fixed["metadata"]["base_agent_name"] == "影刃-初纪"
+    assert fixed["metadata"]["display_name"] == "001影刃-初纪"
+    assert fixed["metadata"]["lineage_index"] == 1
+    assert fixed["metadata"]["lineage_serial"] == "001"
 
     assert conjugate["external_agent_id"].startswith("agent:")
-    assert conjugate["agent_name"]
+    assert conjugate["agent_name"] == "001影刃-初纪"
     assert conjugate["client_url"] == "ws://provider.test:8082"
     assert conjugate["metadata"]["mode"] == "conjugate"
     assert conjugate["metadata"]["is_latest"] is True
+    assert conjugate["metadata"]["base_agent_name"] == "影刃-初纪"
+    assert conjugate["metadata"]["display_name"] == "001影刃-初纪"
+    assert conjugate["metadata"]["lineage_index"] == 1
+    assert conjugate["metadata"]["lineage_serial"] == "001"
     assert conjugate["metadata"]["skill_versions"] == {
         "common-logic": "v1",
         "seer-logic": "v1",
@@ -376,6 +391,12 @@ def test_list_provider_agents_exposes_latest_and_historical_conjugates():
 
     agent_ids = [agent["external_agent_id"] for agent in agents]
     assert agent_ids == ["latest:evolution", f"agent:{promoted_id}", initial_id]
+    assert agents[1]["metadata"]["lineage_index"] == 2
+    assert agents[1]["metadata"]["lineage_serial"] == "002"
+    assert agents[1]["agent_name"].startswith("002")
+    assert agents[2]["metadata"]["lineage_index"] == 1
+    assert agents[2]["metadata"]["lineage_serial"] == "001"
+    assert agents[2]["agent_name"].startswith("001")
     assert agents[1]["metadata"]["is_latest"] is True
     assert agents[1]["metadata"]["skill_versions"]["wolf-logic"] == "v2"
     assert agents[2]["metadata"]["is_latest"] is False
@@ -504,8 +525,12 @@ def test_list_provider_agents_exposes_latest_evolution_fixed_id():
 
     fixed = agents[0]
     assert fixed["external_agent_id"] == "latest:evolution"
+    assert fixed["agent_name"] == "001影刃-初纪"
     assert fixed["metadata"]["mode"] == "latest-evolution"
     assert fixed["metadata"]["is_latest"] is True
+    assert fixed["metadata"]["base_agent_name"] == "影刃-初纪"
+    assert fixed["metadata"]["lineage_index"] == 1
+    assert fixed["metadata"]["lineage_serial"] == "001"
     assert fixed["client_type"] == "ws"
     assert fixed["client_url"] == "ws://provider.test:8082"
 
