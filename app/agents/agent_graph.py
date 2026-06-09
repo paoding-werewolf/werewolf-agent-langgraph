@@ -1,6 +1,7 @@
+import asyncio
 import json
 import re
-from typing import Literal
+from typing import Literal, Optional
 from core.enums import Role
 
 from agents.state import AgentState
@@ -157,7 +158,7 @@ def _dead_player_ids_from_event(event: dict) -> set[str]:
     return dead_ids
 
 
-def _update_working_memory(wm_data: dict | None, event: dict) -> dict | None:
+def _update_working_memory(wm_data: Optional[dict], event: dict) -> Optional[dict]:
     if not wm_data:
         return wm_data
 
@@ -257,6 +258,15 @@ def _extract_sheriff_from_events(events, current_sheriff):
 
 async def _reflect_node(state: AgentState) -> AgentState:
     """AI 内部反思：分析游戏状态并形成思路。JSON 结构化输出。"""
+    # Compress historical speeches (older than 2 days) before building prompt
+    wm_data = state.get("working_memory")
+    if wm_data:
+        from memory.working_memory import WorkingMemory
+        wm = WorkingMemory.from_dict(wm_data)
+        if wm.has_uncompressed_old_speeches():
+            await asyncio.to_thread(wm.compress_old_speeches, llm)
+            state = {**state, "working_memory": wm.to_dict()}
+
     builder = PromptBuilder(Role(state["my_role"]), state["me_id"])
 
     task_guidance = """

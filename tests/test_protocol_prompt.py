@@ -338,7 +338,7 @@ def test_working_memory_keeps_multiple_speeches_in_same_day():
 
     prompt_text = wm.format_for_prompt()
 
-    assert len(wm.speeches["D1"]) == 2
+    assert len([s for s in wm.speeches if s.day == 1]) == 2
     assert "1号：我是好人，先听后置位。" in prompt_text
     assert "2号：警长发言，我会归票。" in prompt_text
 
@@ -351,17 +351,16 @@ def test_prompt_extra_data_injects_working_memory_object():
         "my_seat": "3",
         "day": 1,
         "known_info": [],
-        "speeches": {
-            "D1": {
-                "发言#01 1号": "1号：我是好人，先听后置位。",
-                "发言#02 2号": "2号：警长发言，我会归票。",
-            }
-        },
-        "actions": [],
+        "speeches": [
+            {"raw": "1号：我是好人，先听后置位。", "summary": "", "compressed": False, "day": 1, "phase": "discussion", "speaker": "1"},
+            {"raw": "2号：警长发言，我会归票。", "summary": "", "compressed": False, "day": 1, "phase": "discussion", "speaker": "2"},
+        ],
+        "game_actions": [],
         "my_speeches": {},
         "contradictions": [],
         "flags": [],
         "suspicion": {"高": [], "中": [], "低": []},
+        "day_summaries": {},
     }
 
     extra_data = _build_prompt_extra_data(state)
@@ -374,7 +373,7 @@ def test_prompt_extra_data_injects_working_memory_object():
     )
 
     assert isinstance(extra_data["working_memory"], WorkingMemory)
-    assert "### Speech Timeline" in prompt
+    assert "### Recent Speeches" in prompt
     assert "1号：我是好人，先听后置位。" in prompt
     assert "2号：警长发言，我会归票。" in prompt
 
