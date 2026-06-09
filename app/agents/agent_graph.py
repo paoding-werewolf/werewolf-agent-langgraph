@@ -282,6 +282,11 @@ async def _reflect_node(
 3. 你目前的立场是什么？你是否被怀疑？你将如何辩护？
 4. 审视当前生效的进化策略：策略前提是否成立？推荐行动是否合理？局势是否出现了策略未覆盖的情况？
 5. 根据 Strategy Skill Index 选择当前最需要读取的策略 key。默认选择 0-1 条，明显相关时最多 3 条。
+6. 交叉验证：
+   - 你掌握的私有信息（如查验结果、守护记录、银水信息）中，哪些与公开事件或他人声称一致或矛盾？
+   - 场上是否存在多个独立的推理链指向同一结论？多源一致的可靠性更高。
+   - 是否存在某个关键结论（如某人是狼）只有单一信息源支撑？这种结论应谨慎对待。
+   - 作为神职：你的私有信息能验证或推翻场上哪些已公开的推理？
 """
     final_instr = (
         "以 JSON 格式输出（不要包含 ```json 代码块标记）。\n"
@@ -531,6 +536,38 @@ def _inject_sheriff_vote_call(task_guidance: str, state: AgentState) -> str:
     return task_guidance
 
 
+def _inject_vote_alignment(task_guidance: str, state: AgentState) -> str:
+    """从本轮讨论发言中提取各玩家的态度摘要，注入投票 prompt。"""
+    wm_data = state.get("working_memory")
+    if not wm_data:
+        return task_guidance
+
+    from memory.working_memory import WorkingMemory
+    wm = WorkingMemory.from_dict(wm_data)
+    current_day = state.get("day", 1)
+
+    day_speeches = [
+        s for s in wm.speeches
+        if s.day == current_day and s.phase == "discussion"
+    ]
+    if len(day_speeches) < 2:
+        return task_guidance
+
+    lines = ["本日讨论中各发言者的主要态度："]
+    for s in day_speeches:
+        snippet = s.raw[:120].replace("\n", " ")
+        if len(s.raw) > 120:
+            snippet += "…"
+        lines.append(f"- {s.speaker}号: {snippet}")
+
+    lines.append("")
+    lines.append("请综合以上所有人的态度和你的私有信息，做出投票决定。")
+    lines.append("如果你发现多数人的判断方向与你的私有信息不一致——你可能掌握关键信息，也可能被误导。冷静判断。")
+
+    task_guidance += "\n[场上判断分布]\n" + "\n".join(lines) + "\n"
+    return task_guidance
+
+
 async def _decide_discussion(state: AgentState) -> AgentState:
     """白天讨论：发言和分析。"""
     builder = PromptBuilder(Role(state["my_role"]), state["me_id"])
@@ -552,6 +589,11 @@ async def _decide_discussion(state: AgentState) -> AgentState:
 
 向全场玩家发言。分享你的分析、指出嫌疑人、为自己或盟友辩护。
 记住：要策略性，不要情绪化。好的狼人隐藏身份；好的村民找出狼人。
+
+发言技巧：
+- 如果场上已有其他玩家得出了与你相似的结论，在发言中明确指出——这会让结论更可信
+- 如果你有私有信息可以支撑某个推理方向，考虑如何在不暴露身份的前提下提出
+- 避免孤证推断——尽量引用公开事件、投票记录或他人发言来支撑你的论点
 
 行动规则：
 - 使用 speak 工具进行发言
@@ -610,8 +652,9 @@ async def _decide_vote(state: AgentState) -> AgentState:
 - 村民：跟随你最信任的玩家
 """
 
-    # ── 提取警长归票方向 ──
+    # ── 提取警长归票方向 + 场上判断分布 ──
     task_guidance = _inject_sheriff_vote_call(task_guidance, state)
+    task_guidance = _inject_vote_alignment(task_guidance, state)
 
     final_instr = "使用 vote 工具进行投票（或使用 pass_turn 弃权）。"
 

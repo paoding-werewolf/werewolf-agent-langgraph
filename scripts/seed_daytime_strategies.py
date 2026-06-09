@@ -1,6 +1,6 @@
-"""种子脚本：插入狼人白天协作 + 警长归票策略（幂等，已存在则跳过）。
+"""种子脚本：插入狼人白天隐式协作 + 警长归票策略（幂等，已存在则跳过）。
 
-部署后执行一次即可：
+部署后执行一次：
   cd werewolf-agent-langgraph && python scripts/seed_daytime_strategies.py
 """
 import sys
@@ -10,7 +10,7 @@ from evolution.db import get_session
 from evolution.models import EvolutionSkill
 
 WOLF_DAYTIME_COORDINATION = """---
-name: wolf-daytime-coordination
+name: 狼人白天隐式协作
 role: wolf
 tags: [coordination, deception, identity_management, speech, vote, strategy]
 ---
@@ -47,7 +47,7 @@ tags: [coordination, deception, identity_management, speech, vote, strategy]
 """
 
 SHERIFF_VOTE_CALL = """---
-name: sheriff-vote-call
+name: 警长归票术
 role: common
 tags: [sheriff, vote, speech, persuasion, strategy]
 ---
@@ -86,43 +86,43 @@ tags: [sheriff, vote, speech, persuasion, strategy]
 def seed():
     session = get_session()
     try:
-        # ── 狼人白天协作 ──
+        # ── 狼人白天隐式协作 ──
         existing = session.query(EvolutionSkill).filter_by(
-            skill_name="wolf-daytime-coordination"
+            skill_name="狼人白天隐式协作"
         ).first()
         if existing:
-            print(f"[SKIP] wolf-daytime-coordination already exists (default={existing.current_default})")
+            print(f"[SKIP] 狼人白天隐式协作 already exists (default={existing.current_default})")
         else:
             from evolution.skill_loader import SkillLoader
             from evolution.config import load_config
             cfg = load_config()
             loader = SkillLoader(cfg)
             version = loader.create_new_version(
-                skill_name="wolf-daytime-coordination",
+                skill_name="狼人白天隐式协作",
                 content=WOLF_DAYTIME_COORDINATION,
                 source="bundled",
                 role="wolf",
             )
-            print(f"[OK] wolf-daytime-coordination created as {version}")
+            print(f"[OK] 狼人白天隐式协作 created as {version}")
 
-        # ── 警长归票 ──
+        # ── 警长归票术 ──
         existing = session.query(EvolutionSkill).filter_by(
-            skill_name="sheriff-vote-call"
+            skill_name="警长归票术"
         ).first()
         if existing:
-            print(f"[SKIP] sheriff-vote-call already exists (default={existing.current_default})")
+            print(f"[SKIP] 警长归票术 already exists (default={existing.current_default})")
         else:
             from evolution.skill_loader import SkillLoader
             from evolution.config import load_config
             cfg = load_config()
             loader = SkillLoader(cfg)
             version = loader.create_new_version(
-                skill_name="sheriff-vote-call",
+                skill_name="警长归票术",
                 content=SHERIFF_VOTE_CALL,
                 source="bundled",
                 role="common",
             )
-            print(f"[OK] sheriff-vote-call created as {version}")
+            print(f"[OK] 警长归票术 created as {version}")
 
         session.commit()
         print("Done.")
