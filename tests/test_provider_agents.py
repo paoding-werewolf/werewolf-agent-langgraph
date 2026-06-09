@@ -331,7 +331,12 @@ def test_promoted_conjugate_agent_uses_fallback_when_llm_fails(monkeypatch):
 
 
 def _initial_external_agent_id() -> str:
-    return _list_provider_agents()[0]["external_agent_id"]
+    """返回初始共轭 Agent 的 external_agent_id（跳过 latest:evolution 固定条目）。"""
+    agents = _list_provider_agents()
+    for agent in agents:
+        if agent["external_agent_id"].startswith("agent:"):
+            return agent["external_agent_id"]
+    return agents[0]["external_agent_id"]
 
 
 def test_list_provider_agents_exposes_initial_conjugate_snapshot():
@@ -339,39 +344,48 @@ def test_list_provider_agents_exposes_initial_conjugate_snapshot():
 
     agents = _list_provider_agents()
 
-    assert len(agents) == 1
-    agent = agents[0]
-    assert agent["external_agent_id"].startswith("agent:")
-    assert agent["agent_name"]
-    assert agent["client_url"] == "ws://provider.test:8082"
-    assert agent["metadata"]["mode"] == "conjugate"
-    assert agent["metadata"]["is_latest"] is True
-    assert agent["metadata"]["skill_versions"] == {
+    # 首项是 latest:evolution 固定条目，第二项是共轭 Agent
+    assert len(agents) == 2
+    fixed, conjugate = agents[0], agents[1]
+
+    assert fixed["external_agent_id"] == "latest:evolution"
+    assert fixed["metadata"]["mode"] == "latest-evolution"
+    assert fixed["metadata"]["is_latest"] is True
+
+    assert conjugate["external_agent_id"].startswith("agent:")
+    assert conjugate["agent_name"]
+    assert conjugate["client_url"] == "ws://provider.test:8082"
+    assert conjugate["metadata"]["mode"] == "conjugate"
+    assert conjugate["metadata"]["is_latest"] is True
+    assert conjugate["metadata"]["skill_versions"] == {
         "common-logic": "v1",
         "seer-logic": "v1",
         "wolf-logic": "v1",
     }
-    assert agent["metadata"]["changelog"]
-    assert agent["metadata"]["lore"]
+    assert conjugate["metadata"]["changelog"]
+    assert conjugate["metadata"]["lore"]
 
 
 def test_list_provider_agents_exposes_latest_and_historical_conjugates():
     _seed_initial_skills()
-    initial_id = _initial_external_agent_id()
+    # 拿到初始共轭 Agent 的 ID（列表第二项）
+    initial_id = _list_provider_agents()[1]["external_agent_id"]
     promoted_id = _promote_wolf_logic()
 
     agents = _list_provider_agents()
 
-    assert [agent["external_agent_id"] for agent in agents] == [f"agent:{promoted_id}", initial_id]
-    assert agents[0]["metadata"]["is_latest"] is True
-    assert agents[0]["metadata"]["skill_versions"]["wolf-logic"] == "v2"
-    assert agents[1]["metadata"]["is_latest"] is False
-    assert agents[1]["metadata"]["skill_versions"]["wolf-logic"] == "v1"
+    agent_ids = [agent["external_agent_id"] for agent in agents]
+    assert agent_ids == ["latest:evolution", f"agent:{promoted_id}", initial_id]
+    assert agents[1]["metadata"]["is_latest"] is True
+    assert agents[1]["metadata"]["skill_versions"]["wolf-logic"] == "v2"
+    assert agents[2]["metadata"]["is_latest"] is False
+    assert agents[2]["metadata"]["skill_versions"]["wolf-logic"] == "v1"
 
 
 def test_historical_conjugate_agent_uses_frozen_snapshot():
     _seed_initial_skills()
-    initial_id = _initial_external_agent_id()
+    # 先拿到初始共轭 Agent 的 ID（列表第二项，第一项是 latest:evolution）
+    initial_id = _list_provider_agents()[1]["external_agent_id"]
     _promote_wolf_logic()
 
     versions = _build_versions_used("wolf", initial_id)
@@ -443,7 +457,8 @@ def test_save_game_archives_versions_used():
 
 def test_game_over_skips_evolution_for_historical_conjugate(monkeypatch):
     _seed_initial_skills()
-    initial_id = _initial_external_agent_id()
+    # 初始共轭 Agent ID（列表第二项）
+    initial_id = _list_provider_agents()[1]["external_agent_id"]
     _promote_wolf_logic()
     state = {
         "external_agent_id": initial_id,
@@ -480,3 +495,78 @@ def test_game_over_skips_evolution_for_historical_conjugate(monkeypatch):
     assert resp["skip_evolution"] is True
     assert resp["reason"] == "frozen_conjugate_agent"
     assert called is False
+
+
+def test_list_provider_agents_exposes_latest_evolution_fixed_id():
+    _seed_initial_skills()
+
+    agents = _list_provider_agents()
+
+    fixed = agents[0]
+    assert fixed["external_agent_id"] == "latest:evolution"
+    assert fixed["metadata"]["mode"] == "latest-evolution"
+    assert fixed["metadata"]["is_latest"] is True
+    assert fixed["client_type"] == "ws"
+    assert fixed["client_url"] == "ws://provider.test:8082"
+
+
+def test_latest_evolution_id_resolves_to_live_version_competition(monkeypatch):
+    _seed_initial_skills()
+    _list_provider_agents()  # ensure initial conjugate agent exists
+    _promote_wolf_logic()
+
+    def fake_get_version_for_game(skill_name):
+        return f"live-{skill_name}"
+
+    monkeypatch.setattr(
+        "evolution.skill_loader.SkillLoader.get_version_for_game",
+        lambda self, skill_name: fake_get_version_for_game(skill_name),
+    )
+
+    versions = _build_versions_used("wolf", "latest:evolution")
+
+    assert versions == {
+        "common-logic": "live-common-logic",
+        "wolf-logic": "live-wolf-logic",
+    }
+
+
+def test_game_over_runs_evolution_for_latest_evolution_id(monkeypatch):
+    _seed_initial_skills()
+    _list_provider_agents()  # ensure initial conjugate agent exists
+    _promote_wolf_logic()
+
+    state = {
+        "external_agent_id": "latest:evolution",
+        "room_id": "room-1",
+        "my_role": "wolf",
+        "me_id": "1",
+        "events": [],
+        "players": {},
+        "versions_used": {"wolf-logic": "v2"},
+    }
+    store.create("session-le", state)
+
+    called = False
+
+    async def fake_pipeline(*args, **kwargs):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr("main_ws._run_post_game_pipeline", fake_pipeline)
+
+    resp = asyncio.run(
+        _process_game_over(
+            "session-le",
+            "req-1",
+            "won",
+            "wolf",
+            {},
+            False,
+            "room-1",
+            "wolf",
+        )
+    )
+
+    assert "skip_evolution" not in resp or resp.get("skip_evolution") is not True
+    assert called is True

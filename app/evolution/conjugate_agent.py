@@ -70,6 +70,13 @@ def get_conjugate_agent(session, external_agent_id: str) -> ConjugateAgent | Non
 def parse_conjugate_agent_id(external_agent_id: str | None) -> int | None:
     if not external_agent_id:
         return None
+    if str(external_agent_id) == "latest:evolution":
+        session = get_session()
+        try:
+            latest = get_latest_conjugate_agent(session)
+            return latest.id if latest else None
+        finally:
+            session.close()
     parts = str(external_agent_id).split(":")
     if len(parts) != 2 or parts[0] != "agent":
         return None
@@ -81,7 +88,7 @@ def parse_conjugate_agent_id(external_agent_id: str | None) -> int | None:
 
 def is_latest_conjugate(external_agent_id: str | None) -> bool:
     """判断本次对局是否属于可进化的 Default Agent。"""
-    if not external_agent_id or external_agent_id == "default:common":
+    if not external_agent_id or external_agent_id in ("default:common", "latest:evolution"):
         return True
 
     session = get_session()
@@ -103,12 +110,7 @@ def ensure_initial_conjugate_agent(session) -> ConjugateAgent | None:
     if skill_count <= 0:
         return None
 
-    first_version = (
-        session.query(EvolutionSkillVersion)
-        .order_by(EvolutionSkillVersion.created_at.asc())
-        .first()
-    )
-    born_at = first_version.created_at if first_version and first_version.created_at else _utc_now()
+    born_at = _utc_now()
     snapshot = snapshot_all_skill_versions(session)
     fingerprint = compute_global_fingerprint(session)
     identity = generate_initial_agent_identity(session, fingerprint, snapshot, born_at)
@@ -191,14 +193,14 @@ def maybe_create_conjugate_agent(
         previous_version,
         promoted_version.version,
         snapshot,
-        promoted_version.created_at or _utc_now(),
+        _utc_now(),
     )
     identity = generate_agent_identity(facts)
     agent = ConjugateAgent(
         fingerprint=fingerprint,
         agent_name=identity["agent_name"],
         avatar_seed=generate_avatar_seed(fingerprint),
-        born_at=promoted_version.created_at or _utc_now(),
+        born_at=_utc_now(),
         skill_versions_json=snapshot,
         changelog=identity["changelog"],
         lore=identity["lore"],

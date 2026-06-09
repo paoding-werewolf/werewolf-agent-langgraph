@@ -9,7 +9,7 @@
 
 ### 1.1 双 Part 架构
 
-Landing 页按**编排层/平台侧**与 **Agent 侧/自进化**分为两大叙事 Part，中间以 Sticky Scroll Reveal 转场衔接。
+Landing 页按**编排层/平台侧**与 **Agent 侧/自进化**分为两大叙事 Part，中间以 **Sticky Curtain Reveal** 转场衔接。
 
 ```
 ┌─────────────────────────────────────────────────┐
@@ -25,7 +25,7 @@ Landing 页按**编排层/平台侧**与 **Agent 侧/自进化**分为两大叙�
 │  Chapter 02 / The lab behind the night           │
 │  ← 平台侧：透明观测 / Agent接入 / 研究协议 / 信号沉淀 │
 ├─────────────────────────────────────────────────┤
-│  ═══ Sticky Scroll Reveal 转场 ═══               │
+│  ═══ Sticky Curtain Reveal 转场 ═══               │
 │  "But who thinks in the dark?"                   │
 │  白天→夜晚 / 表面→深处 / 观测→参与                │
 ├─────────────────────────────────────────────────┤
@@ -52,62 +52,127 @@ Landing 页按**编排层/平台侧**与 **Agent 侧/自进化**分为两大叙�
 
 ---
 
-## 二、转场设计：Sticky Scroll Reveal
+## 二、转场设计：Sticky Curtain Reveal
 
-### 2.1 概念
+> **v2 更新**（2026-06-09）：转场方案从 "Sticky Overlap Scroll Reveal" 升级为 "Sticky Curtain Reveal"。
+> 核心变化：旧方案是"覆盖"（转场层升起盖住前段），新方案是"揭幕"（前段整体抬升掀开，露出下方已就绪的后段）。
 
-**"Depth Reveal"**——从表面潜入深处。平台侧是"水面以上"（可见的实验流程），Agent侧是"水面以下"（不可见的内心世界）。
+### 2.1 精确术语
 
-### 2.2 视觉方案
+**前端设计术语**：**Scroll-driven Sticky Curtain Reveal with Depth Layering**
+
+| 术语成分 | 含义 |
+|----------|------|
+| **Scroll-driven** | 所有动画由滚动进度驱动，不是时间驱动 |
+| **Sticky** | Part 1（Features + 转场文案）`position: sticky; top: 0`，在滚动过程中"钉"在视口 |
+| **Curtain** | Part 1 整体作为"幕布"，滚动时向上抬升/缩小/淡出，像掀开幕布 |
+| **Reveal** | Part 2（AgentEvolution）在幕布下方**已经渲染就绪**，幕布掀开后自然"流露"出来 |
+| **Depth Layering** | Part 1 和 Part 2 在不同深度层——Part 1 在上层（遮幕），Part 2 在下层（真相） |
+
+**与旧方案（Sticky Overlap）的本质区别**：
+
+| 维度 | 旧方案 (Sticky Overlap) | 新方案 (Sticky Curtain Reveal) |
+|------|------------------------|-------------------------------|
+| 谁在动 | 转场层从下方升起覆盖 | Part 1 整体向上抬升/掀开 |
+| z-index 关系 | 转场层 > Features | Part 1 > Part 2（遮幕在上） |
+| Part 2 状态 | 转场滚完后才出现 | 一直渲染着，被 Part 1 遮住 |
+| 视觉感受 | 新内容"推上来"覆盖旧内容 | 掀开幕布，露出已有内容 |
+| 叙事含义 | "进入"新世界 | "发现"隐藏的世界 |
+| 滚动映射 | 转场层 opacity 0→1 | Part 1 translateY 0→-X, opacity 1→0, scale 1→0.95 |
+
+**叙事优势**："流露"而非"推入"——暗示 Agent 的内心世界一直都在运转，只是之前被表面遮住了。你掀开表面，它自然就在那里。这比"新内容推上来"更贴合"水面以上/水面以下"的隐喻。
+
+**电影术语类比**：不是"硬切"（跳到下一段），不是"叠化+推镜头"（前段被推远，后段推上来），而是**揭幕**——幕布被掀开，露出幕布后面已经存在的舞台。
+
+### 2.2 概念
+
+**"Curtain Reveal"**——掀开表面，露出深处。平台侧是"幕布"（可见的实验流程），Agent侧是"幕布后面的舞台"（一直运转的内心世界）。幕布掀开，舞台自然呈现。
+
+### 2.3 视觉方案
 
 ```
-转场区 (高度 150svh，给足滚动空间)
+转场区 (高度 200svh，给足滚动空间)
 
 滚动进度 0% ────────────────────────────────────────── 100%
      │              │              │              │
      │  Phase A     │  Phase B     │  Phase C     │
-     │  0-35%       │  35-65%      │  65-100%     │
+     │  0-30%       │  30-65%      │  65-100%     │
      │              │              │              │
-     │  Features区  │  暗色层+文案  │  Agent区     │
-     │  fade-out    │  淡入→停留→淡出│  从底部升起  │
+     │  Part 1      │  转场文案     │  Part 1      │
+     │  sticky+抬升 │  在幕布上显示 │  完全掀开    │
+     │  scale↓blur↑ │  淡入→停留   │  Part 2      │
+     │  opacity↓    │  →淡出       │  完全流露    │
 ```
 
-**Phase A（0-35%）：Features区退场**
-- Features区整体：`opacity: 1→0`，`scale: 1→0.94`，`filter: blur(0→4px)`
-- 底部渐变遮罩：从透明到 stone-950，高度从 0 增长到 100%
-- 实现方式：Features区不需要改，转场区自身用 sticky 定位覆盖上去
+**Phase A（0-30%）：Part 1 幕布开始抬升**
+- Part 1（Features + 转场文案区）整体 sticky 在视口顶部
+- 滚动驱动：`translateY: 0→-40px`，`scale: 1→0.96`，`filter: blur(0→3px)`，`opacity: 1→0.7`
+- 视觉感受：页面开始"上抬"，像幕布被掀起一角
+- Part 2 在 z-index 更低的层，已经开始从底部露出
 
-**Phase B（35-65%）：暗色层+文案**
+**Phase B（30-65%）：幕布上的转场文案**
 
 文案时序（叙事节奏：定位→好奇→理解→期待）：
 
 ```
-eyebrow:   ████████░░░░░░░░░░░░  (35-48% 入, 55-63% 出)
-主标题:     ░░████████████░░░░░  (38-52% 入, 58-65% 出)  ← 可见窗口最大，压轴
-副文案:     ░░░░██████░░░░░░░░░  (41-53% 入, 56-63% 出)
-呼吸光:     ████████████████████  (35-65% 持续)
+eyebrow:   ████████░░░░░░░░░░░░  (30-48% 入, 55-63% 出)
+主标题:     ░░████████████░░░░░  (33-52% 入, 58-65% 出)  ← 可见窗口最大，压轴
+副文案:     ░░░░██████░░░░░░░░░  (36-53% 入, 56-63% 出)
+呼吸光:     ████████████████████  (30-65% 持续)
 ```
 
-- 背景：纯 stone-950，带微弱网格纹理（复用 LandingSection 的网格 pattern）
+- 文案显示在 Part 1 幕布上（幕布还在视口中，只是缩小+模糊了）
 - 文案进入方式：`y: 24→0` + `filter: blur(6px→0)`，不是简单 fade
 - 呼吸动画：背景 amber 径向渐变，`opacity: 0.03↔0.08`，周期 3s，`scale: 0.8↔1.2`
+- Part 2 在幕布下方持续露出更多
 
-**Phase C（65-100%）：Agent区入场**
-- AgentEvolution区：`position: sticky; top: 0; z-index: 20`
-- 入场动画：`y: 60→0`，`opacity: 0→1`
-- 覆盖暗色层，视觉上像"新页面从下方推上来"
+**Phase C（65-100%）：幕布完全掀开，Part 2 流露**
+- Part 1：`opacity: 0.7→0`，`translateY: -40→-80px`，`scale: 0.96→0.92`，完全淡出
+- Part 2（AgentEvolution）：已经完全可见，无入场动画——它一直都在
+- 视觉感受：幕布消失，舞台完整呈现
 
-### 2.3 技术实现要点
+### 2.4 技术实现要点
 
-- 转场区自身 `position: relative`，高度 150svh
-- 内部有一个 `position: sticky; top: 0` 的视口固定层，承载文案和呼吸动画
-- AgentEvolution区紧跟在转场区后面，也是 `sticky; top: 0`，z-index 更高
-- 滚动进度用 `useScroll({ target: transitionRef })` 精确绑定到转场区
-- Features区 fade-out 复用 Hero 的 scroll-out 模式（opacity + scale + blur）
-- 转场文案用 `useTransform()` 精确映射滚动进度到 opacity/y/blur
-- 呼吸动画：CSS `@keyframes` 或 motion `animate`，amber 微光 opacity 0.03→0.08 循环
+**核心架构：Sticky Curtain Pattern**
 
-### 2.4 文案
+```
+z-index 层级关系：
+
+  ┌─ Part 1 (z-index: 30) ──────────────────────┐
+  │  Features + 转场文案                          │
+  │  position: sticky; top: 0                     │
+  │  滚动时: translateY↑ scale↓ blur↑ opacity↓   │
+  └──────────────────────────────────────────────┘
+         ↓ 掀开后露出
+  ┌─ Part 2 (z-index: 10, 正常流式) ─────────────┐
+  │  AgentEvolution + EvolutionDeepDive           │
+  │  一直渲染着，被 Part 1 遮住                    │
+  │  无入场动画——幕布掀开即见                      │
+  └──────────────────────────────────────────────┘
+```
+
+**关键实现细节**：
+
+1. Part 1 包裹在一个容器内：`position: sticky; top: 0; z-index: 30`
+2. Part 1 容器高度 `200svh`（给足滚动空间），内部视口 `height: 100vh`
+3. 滚动进度用 `useScroll({ target: containerRef })` 精确绑定到 Part 1 容器
+4. Part 1 的退场动画用 `useTransform()` 映射滚动进度：
+   - `translateY: 0 → -80px`（向上抬升，"掀开"感）
+   - `scale: 1 → 0.92`（缩小，"远离"感）
+   - `filter: blur(0 → 6px)`（模糊，"消融"感）
+   - `opacity: 1 → 0`（淡出）
+5. 转场文案叠加在 Part 1 幕布上，按时序淡入淡出
+6. Part 2（AgentEvolution）正常流式布局，z-index 更低，**无入场动画**
+7. 呼吸动画：motion `animate`，amber 微光 opacity 0.03→0.08 循环
+8. Features 区**不需要修改**——它被包含在 Part 1 容器内，随容器一起退场
+9. **移动端降级**：`filter: blur()` + `transform: scale()` 同时使用可能触发 GPU 合成层爆炸，移动端应降级为 `blur→去掉`（仅保留 opacity fade + translateY），`scale→去掉`。用 `useMediaQuery` 或 CSS `@media (hover: hover)` 检测桌面端才启用完整动画
+
+**与 Apple Sticky Shrink-out 的区别**：
+- Apple：内容 sticky 缩小淡出，**同时**下一段从下方滑入（slide in）
+- 我们：内容 sticky 缩小淡出，下一段**不滑入**——它已经在那里，只是之前被遮住
+- 这个区别是叙事性的："滑入"暗示内容是新的、刚到的；"流露"暗示内容一直都在
+
+### 2.5 文案
 
 | 元素 | 内容 |
 |------|------|
@@ -161,6 +226,14 @@ eyebrow:   ████████░░░░░░░░░░░░  (35-48%
   - 布局概念：`PERCEIVE ──→ REFLECT ──→ ACT` / `↑ FLAG ←──────────┘`
 - 循环播放，暗示决策流的持续运转
 
+**Curtain Reveal 下的视觉状态**：
+
+AgentEvolution 在 Curtain Reveal 中是"幕布下方的舞台"——它**不需要入场动画**，因为幕布掀开后它自然就在那里。但需要考虑：
+
+1. **渐显过渡**：AgentEvolution 顶部需要一个 `bg-gradient-to-t from-transparent to-[#0a0908]` 的遮罩（高度约 80px），这样幕布抬升时 Part 2 的顶部是柔和过渡而非硬边
+2. **首屏就绪**：AgentEvolution 的顶部内容（eyebrow + 标题）应该在视口第一屏就可见，不需要滚动才能看到
+3. **背景连续性**：AgentEvolution 的背景色必须与幕布底部的渐变一致（`#0a0908`），确保视觉无缝
+
 **文案**：
 
 | 元素 | 内容 |
@@ -185,6 +258,14 @@ eyebrow:   ████████░░░░░░░░░░░░  (35-48%
 │  双阈值进度条  │  Pareto 前沿  │  人格时间线    │
 └──────────────┴──────────────┴──────────────┘
 ```
+
+**与 AgentEvolution 的衔接**：
+
+EvolutionDeepDive 不在幕布下方，而是 AgentEvolution 之后的正常滚动区。它不需要"Curtain Reveal 首屏就绪"处理，但需要与 AgentEvolution 的叙事衔接：
+
+- **叙事转折**：AgentEvolution 回答"Agent 的思维是什么"（Perceive→Reflect→Act），EvolutionDeepDive 回答"Agent 如何进化"（三大创新）。从"是什么"到"怎么做"的深化。
+- **视觉衔接**：AgentEvolution 的 Canvas 决策流动画播放完毕后，视觉焦点自然下移。EvolutionDeepDive 的三卡片用 `whileInView` 入场，与 AgentEvolution 的退场无耦合。
+- **无需额外转场**：两个区之间不插入转场组件，靠滚动自然过渡。Chapter 04 标题 + 三卡片交错入场（§3.3）本身就是"软转场"。
 
 **三卡片详细规划**：
 
@@ -391,6 +472,24 @@ CTA           → stone-950 + amber (品牌色收束)
 | DeepDive | GEPA | orange | 进化、能量 |
 | DeepDive | 共轭Agent | rose | 人格、身份 |
 
+### 4.3 幕布边界色彩策略
+
+Curtain Reveal 的幕布退场涉及两层视觉叠加，需要明确色彩处理：
+
+**基础判断：无需额外渐变**
+
+Curtain（Features + TransitionOverlay）背景 `stone-950`，AgentEvolution 背景也是 `stone-950`。当 curtain 处于半透明状态（opacity < 1）时，两层 stone-950 叠加仍为 stone-950，**不存在色差问题**。
+
+Curtain 退场时的 `blur` 效果使内容从清晰→模糊→消失，视觉上呈现"模糊的 stone-950 → 清晰的 stone-950"过渡，这恰好匹配"水面下物体从模糊变清晰"的隐喻，**blur 退场本身就是最好的色彩过渡**。
+
+**amber 微光消散效果**
+
+TransitionOverlay 上的 amber 微光（`amber-300/20` 光晕）会随 curtain 一起 blur + fade。在幕布边缘会产生短暂的"amber 光晕消散"效果——像水面上最后一丝光消失。这是**预期行为**，不需要抑制，反而增强了"从水面以上进入水面以下"的叙事感。
+
+**移动端降级**
+
+移动端关闭 blur（性能考量），退场动画简化为 `opacity: 1→0` + `translateY↑`。此时 amber 微光会直接 fade 而非"消散"，效果依然可接受。
+
 ---
 
 ## 五、技术亮点提炼（从 DEFENSE_DOC）
@@ -431,7 +530,8 @@ Landing 页不是论文，每个亮点必须回答三个问题：
 
 | 组件 | 文件名 | 职责 |
 |------|--------|------|
-| 转场区 | `DepthRevealTransition.tsx` | Sticky Scroll Reveal 转场，"But who thinks in the dark?" |
+| 幕布容器 | `CurtainWrapper.tsx` | Sticky Curtain Reveal 容器，包裹 Part 1 + 转场文案，控制幕布退场动画 |
+| 转场文案层 | `TransitionOverlay.tsx` | 叠加在幕布上的转场文案，"But who thinks in the dark?" |
 | Agent 闭环全景 | `AgentEvolution.tsx` | Chapter 03，感知→反思→行动 + FLAG |
 | 决策流 Canvas | `DecisionFlowCanvas.tsx` | 复用 tile-flip 体系，PERCEIVE→REFLECT→ACT→FLAG 轮播 |
 | 自进化深潜 | `EvolutionDeepDive.tsx` | Chapter 04，三卡片：去抖/GEPA/共轭Agent |
@@ -439,33 +539,65 @@ Landing 页不是论文，每个亮点必须回答三个问题：
 | Pareto Skeleton | `ParetoFrontSkeleton.tsx` | Pareto 前沿散点图动画 |
 | 人格时间线 | `ConjugateTimelineSkeleton.tsx` | 共轭Agent人格时间线 |
 
+> **注意**：旧组件 `DepthRevealTransition.tsx` 已被 `CurtainWrapper.tsx` + `TransitionOverlay.tsx` 替代。
+
 ### 6.2 复用/修改组件
 
 | 组件 | 修改内容 |
 |------|---------|
 | `EvolutionCarouselCanvas.tsx` | WORDS 数组改为 `["PERCEIVE", "REFLECT", "ACT", "FLAG"]`，供 DecisionFlowCanvas 复用 |
-| `Features.tsx` | 保持不变，作为 Part 1 内容 |
+| `Features.tsx` | 保持不变，作为幕布内容，被 CurtainWrapper 包裹 |
 | `LandingSection.tsx` | 可能需要扩展，支持 Part 2 的不同布局模式 |
+| `AgentEvolution.tsx` | 顶部添加渐变遮罩（`bg-gradient-to-t from-transparent to-[#0a0908]`），确保与幕布无缝过渡 |
 
 ### 6.3 页面组装变更
 
-现有页面组装文件（推测在 `page.tsx` 或类似入口）需修改：
+Curtain Reveal 改变了组件层级关系——Part 1 被包裹在幕布容器内：
 
 ```tsx
-// 现有
+// 旧架构（线性排列）
 <Hero />
 <HeroBridge />
 <Features />
+<DepthRevealTransition />
+<AgentEvolution />
+<EvolutionDeepDive />
+<HotRooms />
 <LandingCTA />
+<LandingFooter />
 
-// 新增后
+// 新架构（Curtain Reveal）
 <Hero />
 <HeroBridge />
-<Features />
-<DepthRevealTransition />      {/* 新增：转场 */}
-<AgentEvolution />             {/* 新增：Chapter 03 */}
-<EvolutionDeepDive />          {/* 新增：Chapter 04 */}
+<CurtainWrapper>                    {/* 幕布容器 */}
+  <Features />                      {/* 幕布内容 */}
+  <TransitionOverlay />             {/* 幕布上的转场文案 */}
+</CurtainWrapper>
+<AgentEvolution />                  {/* 幕布下方，自然露出 */}
+<EvolutionDeepDive />
+<HotRooms />
 <LandingCTA />
+<LandingFooter />
+```
+
+**CurtainWrapper 内部结构**：
+
+```
+┌─ CurtainWrapper (height: 250svh, position: relative) ──────────┐
+│                                                                  │
+│  ┌─ sticky viewport (position: sticky; top: 0; z-index: 30) ─┐ │
+│  │                                                              │ │
+│  │  <Features />                                                │ │
+│  │  ← 幕布上的内容，滚动时 opacity↓ scale↓ blur↑              │ │
+│  │                                                              │ │
+│  │  <TransitionOverlay />                                       │ │
+│  │  ← 叠加在 Features 上的转场文案                              │ │
+│  │  ← 呼吸光 + eyebrow + title + subtitle                      │ │
+│  │                                                              │ │
+│  └──────────────────────────────────────────────────────────────┘ │
+│                                                                  │
+└──────────────────────────────────────────────────────────────────┘
+→ <AgentEvolution /> (z-index: 10, 正常流式, 幕布掀开后自然露出)
 ```
 
 ---
@@ -473,20 +605,23 @@ Landing 页不是论文，每个亮点必须回答三个问题：
 ## 七、实施优先级
 
 ### Phase 1：骨架（先出结构，动画用占位）
-1. `DepthRevealTransition.tsx` — 转场区，文案 + 基础 sticky 布局
-2. `AgentEvolution.tsx` — 文案 + 三步骤列表，Canvas 用静态占位
-3. `EvolutionDeepDive.tsx` — 三卡片，Skeleton 用静态占位
+1. `CurtainWrapper.tsx` — 幕布容器，sticky 布局 + 滚动驱动退场动画
+2. `TransitionOverlay.tsx` — 转场文案层，叠加在幕布上
+3. `AgentEvolution.tsx` — 文案 + 三步骤列表，Canvas 用静态占位，顶部渐变遮罩
+4. `EvolutionDeepDive.tsx` — 三卡片，Skeleton 用静态占位
+5. 页面组装 — 用 CurtainWrapper 包裹 Features + TransitionOverlay
 
 ### Phase 2：Canvas 动画
-4. `DecisionFlowCanvas.tsx` — 复用 tile-flip，PERCEIVE→REFLECT→ACT→FLAG
-5. `DebouncedSkeleton.tsx` — 双阈值进度条
-6. `ParetoFrontSkeleton.tsx` — Pareto 散点图
-7. `ConjugateTimelineSkeleton.tsx` — 人格时间线
+6. `DecisionFlowCanvas.tsx` — 复用 tile-flip，PERCEIVE→REFLECT→ACT→FLAG
+7. `DebouncedSkeleton.tsx` — 双阈值进度条
+8. `ParetoFrontSkeleton.tsx` — Pareto 散点图
+9. `ConjugateTimelineSkeleton.tsx` — 人格时间线
 
 ### Phase 3：打磨
-8. 转场区呼吸动画 + 滚动进度映射微调
-9. 色彩语义一致性检查
-10. 移动端适配
+10. 幕布退场动画参数微调（translateY/scale/blur/opacity 曲线）
+11. 转场文案时序微调
+12. 色彩语义一致性检查
+13. 移动端适配
 
 ---
 
@@ -498,4 +633,9 @@ Landing 页不是论文，每个亮点必须回答三个问题：
 | 2 | DecisionFlowCanvas 是否直接复用 EvolutionCarouselCanvas 还是新建？ | 待决 | 复用改 WORDS 数组最省，但连线动画需要扩展 |
 | 3 | Pareto 散点图是否需要真实数据？ | 待决 | 可以用 mock 数据，但如果有真实进化数据更有说服力 |
 | 4 | 共轭Agent人格时间线是否调用真实 API？ | 待决 | Features 区有调用真实 API 的先例（AgentConnectSkeleton） |
+| 5 | z-index stacking context 陷阱 | 需验证 | CurtainWrapper `sticky; z-index:30`，若 Features 卡片有 hover `scale` 变换会创建新 stacking context，可能破坏 z-index 层级 |
+| 6 | 移动端 sticky + blur 性能 | 需降级 | `position: sticky` + `filter: blur()` + `transform: scale()` 同时使用可能触发 GPU 合成层爆炸；移动端应降级为 blur→opacity fade，scale→去掉 |
+| 7 | Safari sticky containing block 计算 | 需验证 | Safari 对 sticky 元素的 containing block 计算有时与其他浏览器不同，若 CurtainWrapper 父容器高度非显式设定，sticky 行为可能不一致 |
+| 8 | 屏幕阅读器可访问性 | 待决 | curtain 退场时内容仅视觉消失（opacity:0），DOM 仍在。需 `aria-hidden` 配合 scroll progress 动态切换，避免屏幕阅读器读到"不可见"内容 |
+| 9 | 快速滚动时 useScroll 帧率 | 需验证 | curtain 容器 120svh，scroll range 大，快速滚动时 `useScroll` + `useTransform` 可能丢帧；可考虑 `will-change: transform` 提示 GPU 加速 |
 | 5 | Part 2 是否需要独立的 CTA？ | 待决 | 可以在 EvolutionDeepDive 底部加一个"查看进化面板"入口 |

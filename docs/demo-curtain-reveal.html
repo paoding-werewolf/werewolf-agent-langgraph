@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sticky Curtain Reveal — Demo</title>
+<style>
+  *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg: #0a0908;
+    --surface: #1c1917;
+    --text: #f5f5f4;
+    --text-muted: #a8a29e;
+    --text-dim: #57534e;
+    --amber: #f59e0b;
+    --amber-glow: rgba(245, 158, 11, 0.15);
+    --emerald: #34d399;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Georgia', 'Times New Roman', serif;
+    overflow-x: hidden;
+  }
+
+  /* ── Part 0: Hero (模拟) ── */
+  .hero {
+    height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(180deg, var(--bg) 0%, #0f0e0d 100%);
+    position: relative;
+  }
+  .hero h1 {
+    font-size: clamp(2.5rem, 6vw, 5rem);
+    font-weight: 400;
+    line-height: 1;
+    text-align: center;
+    color: var(--text);
+  }
+  .hero h1 span { color: var(--amber); }
+  .hero .scroll-hint {
+    position: absolute;
+    bottom: 2rem;
+    left: 50%;
+    transform: translateX(-50%);
+    color: var(--text-dim);
+    font-size: 0.75rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    animation: bounce 2s ease-in-out infinite;
+  }
+  @keyframes bounce {
+    0%, 100% { transform: translateX(-50%) translateY(0); }
+    50% { transform: translateX(-50%) translateY(8px); }
+  }
+
+  /* ── Part 1: Features (模拟) — 这就是"幕布" ── */
+  .curtain-wrapper {
+    position: relative;
+    height: 250vh; /* 给足滚动空间 */
+  }
+
+  .curtain {
+    position: sticky;
+    top: 0;
+    z-index: 30;
+    height: 100vh;
+    width: 100%;
+    will-change: transform, opacity, filter;
+    background: var(--bg);
+    overflow: hidden;
+  }
+
+  .curtain .features-content {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 2rem;
+    position: relative;
+    z-index: 2;
+  }
+
+  .curtain .features-content .eyebrow {
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--emerald);
+    margin-bottom: 1.5rem;
+  }
+
+  .curtain .features-content h2 {
+    font-size: clamp(2rem, 4.5vw, 3.5rem);
+    font-weight: 400;
+    line-height: 1;
+    text-align: center;
+    margin-bottom: 1rem;
+  }
+
+  .curtain .features-content p {
+    font-size: 1rem;
+    color: var(--text-muted);
+    text-align: center;
+    max-width: 480px;
+    line-height: 1.6;
+  }
+
+  .curtain .features-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 1rem;
+    margin-top: 2.5rem;
+    max-width: 800px;
+    width: 100%;
+  }
+
+  .curtain .feature-card {
+    background: var(--surface);
+    border: 1px solid rgba(120, 113, 108, 0.2);
+    border-radius: 8px;
+    padding: 1.25rem;
+    min-height: 120px;
+  }
+
+  .curtain .feature-card .card-icon {
+    font-size: 1.5rem;
+    margin-bottom: 0.75rem;
+  }
+
+  .curtain .feature-card h3 {
+    font-size: 0.95rem;
+    font-weight: 400;
+    margin-bottom: 0.4rem;
+  }
+
+  .curtain .feature-card p {
+    font-size: 0.75rem;
+    color: var(--text-dim);
+    text-align: left;
+    line-height: 1.5;
+  }
+
+  /* ── 转场文案层（叠加在幕布上） ── */
+  .curtain .transition-text {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    z-index: 10;
+    pointer-events: none;
+    opacity: 0;
+  }
+
+  .curtain .transition-text .t-eyebrow {
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--amber);
+    margin-bottom: 1.5rem;
+  }
+
+  .curtain .transition-text h2 {
+    font-size: clamp(2.2rem, 5vw, 4rem);
+    font-weight: 400;
+    line-height: 1;
+    text-align: center;
+    color: var(--text);
+  }
+
+  .curtain .transition-text .t-sub {
+    font-size: 1rem;
+    color: var(--text-muted);
+    text-align: center;
+    max-width: 480px;
+    line-height: 1.6;
+    margin-top: 1.25rem;
+  }
+
+  /* 呼吸光 */
+  .curtain .breath-glow {
+    position: absolute;
+    inset: 0;
+    z-index: 5;
+    pointer-events: none;
+    opacity: 0;
+    background: radial-gradient(ellipse 60% 50% at 50% 50%, var(--amber-glow), transparent 70%);
+  }
+
+  /* ── Part 2: Agent 侧（幕布下方，已经就绪） ── */
+  .part2 {
+    position: relative;
+    z-index: 10;
+    min-height: 100vh;
+    background: var(--bg);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 4rem 2rem;
+  }
+
+  .part2 .eyebrow {
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--amber);
+    margin-bottom: 1.5rem;
+  }
+
+  .part2 h2 {
+    font-size: clamp(2rem, 4.5vw, 3.5rem);
+    font-weight: 400;
+    line-height: 1;
+    text-align: center;
+    margin-bottom: 1rem;
+  }
+
+  .part2 p {
+    font-size: 1rem;
+    color: var(--text-muted);
+    text-align: center;
+    max-width: 480px;
+    line-height: 1.6;
+  }
+
+  .part2 .agent-flow {
+    display: flex;
+    gap: 2rem;
+    margin-top: 3rem;
+    align-items: center;
+  }
+
+  .part2 .flow-step {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .part2 .flow-step .step-circle {
+    width: 64px;
+    height: 64px;
+    border-radius: 50%;
+    border: 2px solid var(--amber);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    color: var(--amber);
+    background: rgba(245, 158, 11, 0.05);
+  }
+
+  .part2 .flow-step span {
+    font-size: 0.85rem;
+    color: var(--text-muted);
+  }
+
+  .part2 .flow-arrow {
+    color: var(--text-dim);
+    font-size: 1.2rem;
+  }
+
+  /* ── Part 3: 更多内容 ── */
+  .more-content {
+    min-height: 100vh;
+    background: linear-gradient(180deg, var(--bg) 0%, #0f0e0d 100%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 4rem 2rem;
+  }
+
+  .more-content h2 {
+    font-size: clamp(1.5rem, 3vw, 2.5rem);
+    font-weight: 400;
+    text-align: center;
+    color: var(--text-muted);
+  }
+
+  /* ── 进度指示器 ── */
+  .progress-bar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    height: 3px;
+    background: var(--amber);
+    z-index: 100;
+    transition: width 0.1s linear;
+  }
+
+  /* ── 调试信息 ── */
+  .debug {
+    position: fixed;
+    bottom: 1rem;
+    right: 1rem;
+    background: rgba(0,0,0,0.8);
+    color: var(--amber);
+    font-family: monospace;
+    font-size: 0.7rem;
+    padding: 0.75rem 1rem;
+    border-radius: 6px;
+    z-index: 100;
+    line-height: 1.6;
+    border: 1px solid rgba(245, 158, 11, 0.2);
+  }
+</style>
+</head>
+<body>
+
+<!-- 进度条 -->
+<div class="progress-bar" id="progressBar"></div>
+
+<!-- Part 0: Hero -->
+<section class="hero">
+  <h1>When agents<br><span>evolve themselves</span></h1>
+  <div class="scroll-hint">↓ scroll to explore</div>
+</section>
+
+<!-- Part 1: 幕布区 (Features + 转场文案) -->
+<div class="curtain-wrapper" id="curtainWrapper">
+  <div class="curtain" id="curtain">
+
+    <!-- Features 内容（幕布上的内容） -->
+    <div class="features-content" id="featuresContent">
+      <p class="eyebrow">Chapter 02 / The lab behind the night</p>
+      <h2>The lab behind the night</h2>
+      <p>透明的实验流程、Agent 接入协议、研究公平性保障、信号沉淀机制</p>
+      <div class="features-grid">
+        <div class="feature-card">
+          <div class="card-icon">🔍</div>
+          <h3>透明观测</h3>
+          <p>每一局对弈的全链路可追溯</p>
+        </div>
+        <div class="feature-card">
+          <div class="card-icon">🔌</div>
+          <h3>Agent 接入</h3>
+          <p>标准化协议，一行代码接入</p>
+        </div>
+        <div class="feature-card">
+          <div class="card-icon">📜</div>
+          <h3>研究协议</h3>
+          <p>公平性保障与可复现性</p>
+        </div>
+        <div class="feature-card">
+          <div class="card-icon">📊</div>
+          <h3>信号沉淀</h3>
+          <p>对局数据自动归档分析</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- 呼吸光 -->
+    <div class="breath-glow" id="breathGlow"></div>
+
+    <!-- 转场文案（叠加在幕布上，滚动到一定进度时显示） -->
+    <div class="transition-text" id="transitionText">
+      <p class="t-eyebrow">Chapter 02.5 / The Threshold</p>
+      <h2>But who thinks<br>in the dark?</h2>
+      <p class="t-sub">平台记录了每一局的结果。但局与局之间，谁在反思、调整、进化？</p>
+    </div>
+
+  </div>
+</div>
+
+<!-- Part 2: Agent 侧（幕布下方，已经就绪） -->
+<section class="part2">
+  <p class="eyebrow">Chapter 03 / The mind within</p>
+  <h2>Every move starts<br>with a thought</h2>
+  <p>三节点决策流：感知局势、反思矛盾、输出行动。策略与现实的偏差，在对局中就被标记。</p>
+  <div class="agent-flow">
+    <div class="flow-step">
+      <div class="step-circle">01</div>
+      <span>Perceive</span>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">
+      <div class="step-circle">02</div>
+      <span>Reflect</span>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">
+      <div class="step-circle">03</div>
+      <span>Act</span>
+    </div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step">
+      <div class="step-circle">🏴</div>
+      <span>Flag</span>
+    </div>
+  </div>
+</section>
+
+<!-- Part 3: 更多内容 -->
+<section class="more-content">
+  <h2>... more content below ...</h2>
+</section>
+
+<!-- 调试信息 -->
+<div class="debug" id="debug">
+  scroll: 0%<br>
+  phase: —<br>
+  curtain: —
+</div>
+
+<script>
+  const curtainWrapper = document.getElementById('curtainWrapper');
+  const curtain = document.getElementById('curtain');
+  const featuresContent = document.getElementById('featuresContent');
+  const transitionText = document.getElementById('transitionText');
+  const breathGlow = document.getElementById('breathGlow');
+  const debug = document.getElementById('debug');
+  const progressBar = document.getElementById('progressBar');
+
+  function lerp(a, b, t) {
+    return a + (b - a) * Math.max(0, Math.min(1, t));
+  }
+
+  function clamp(v, min, max) {
+    return Math.max(min, Math.min(max, v));
+  }
+
+  // 将 scroll progress 映射到 [0, 1] 的某个区间
+  function mapRange(value, inMin, inMax) {
+    return clamp((value - inMin) / (inMax - inMin), 0, 1);
+  }
+
+  function update() {
+    const rect = curtainWrapper.getBoundingClientRect();
+    const wrapperHeight = curtainWrapper.offsetHeight;
+    const scrolled = -rect.top; // 从 wrapper 顶部到视口顶部的距离
+    const maxScroll = wrapperHeight - window.innerHeight;
+    const progress = clamp(scrolled / maxScroll, 0, 1);
+
+    // ── Phase A (0-30%): 幕布开始抬升 ──
+    const phaseA = mapRange(progress, 0, 0.30);
+
+    // 幕布变换：向上抬升 + 缩小 + 模糊 + 淡出
+    const curtainY = lerp(0, -60, phaseA);
+    const curtainScale = lerp(1, 0.96, phaseA);
+    const curtainBlur = lerp(0, 3, phaseA);
+    const curtainOpacity = lerp(1, 0.7, phaseA);
+
+    // Features 内容淡出
+    const featuresOpacity = lerp(1, 0, phaseA);
+
+    // ── Phase B (30-65%): 转场文案 ──
+    // eyebrow: 30-48% 入, 55-63% 出
+    const eyebrowIn = mapRange(progress, 0.30, 0.42);
+    const eyebrowOut = mapRange(progress, 0.55, 0.63);
+    const eyebrowOpacity = Math.min(eyebrowIn, 1 - eyebrowOut);
+    const eyebrowY = lerp(24, 0, eyebrowIn);
+
+    // title: 33-52% 入, 58-65% 出
+    const titleIn = mapRange(progress, 0.33, 0.46);
+    const titleOut = mapRange(progress, 0.58, 0.65);
+    const titleOpacity = Math.min(titleIn, 1 - titleOut);
+    const titleY = lerp(24, 0, titleIn);
+
+    // subtitle: 36-53% 入, 56-63% 出
+    const subIn = mapRange(progress, 0.36, 0.48);
+    const subOut = mapRange(progress, 0.56, 0.63);
+    const subOpacity = Math.min(subIn, 1 - subOut);
+    const subY = lerp(24, 0, subIn);
+
+    // 呼吸光: 28-68% 持续
+    const breathOpacity = mapRange(progress, 0.28, 0.35) * (1 - mapRange(progress, 0.62, 0.68));
+
+    // ── Phase C (65-100%): 幕布完全掀开 ──
+    const phaseC = mapRange(progress, 0.55, 0.85);
+
+    const finalY = lerp(curtainY, -120, phaseC);
+    const finalScale = lerp(curtainScale, 0.90, phaseC);
+    const finalBlur = lerp(curtainBlur, 8, phaseC);
+    const finalOpacity = lerp(curtainOpacity, 0, phaseC);
+
+    // ── 应用变换 ──
+    curtain.style.transform = `translateY(${finalY}px) scale(${finalScale})`;
+    curtain.style.filter = `blur(${finalBlur}px)`;
+    curtain.style.opacity = finalOpacity;
+
+    featuresContent.style.opacity = featuresOpacity;
+
+    // 转场文案
+    const tChildren = transitionText.children;
+    // t-eyebrow
+    tChildren[0].style.opacity = eyebrowOpacity;
+    tChildren[0].style.transform = `translateY(${eyebrowY}px)`;
+    // h2
+    tChildren[1].style.opacity = titleOpacity;
+    tChildren[1].style.transform = `translateY(${titleY}px)`;
+    // t-sub
+    tChildren[2].style.opacity = subOpacity;
+    tChildren[2].style.transform = `translateY(${subY}px)`;
+
+    transitionText.style.opacity = Math.max(eyebrowOpacity, titleOpacity, subOpacity) > 0.01 ? 1 : 0;
+
+    // 呼吸光
+    breathGlow.style.opacity = breathOpacity * 0.12;
+
+    // 进度条
+    progressBar.style.width = (progress * 100) + '%';
+
+    // 调试信息
+    let phase = '—';
+    if (progress < 0.30) phase = 'A: 幕布抬升';
+    else if (progress < 0.65) phase = 'B: 转场文案';
+    else phase = 'C: 幕布掀开';
+
+    debug.innerHTML =
+      `scroll: ${(progress * 100).toFixed(1)}%<br>` +
+      `phase: ${phase}<br>` +
+      `curtain: y=${finalY.toFixed(0)} scale=${finalScale.toFixed(3)} blur=${finalBlur.toFixed(1)} op=${finalOpacity.toFixed(2)}`;
+  }
+
+  // 使用 requestAnimationFrame 节流
+  let ticking = false;
+  window.addEventListener('scroll', () => {
+    if (!ticking) {
+      requestAnimationFrame(() => {
+        update();
+        ticking = false;
+      });
+      ticking = true;
+    }
+  });
+
+  // 初始更新
+  update();
+</script>
+
+</body>
+</html>

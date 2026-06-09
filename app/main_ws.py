@@ -130,7 +130,11 @@ def _build_versions_used(role: str, external_agent_id: str | None = None) -> dic
 
 
 def _list_provider_agents() -> list[dict]:
-    """向编排层暴露共轭 Agent 列表。"""
+    """向编排层暴露共轭 Agent 列表。
+
+    列表首项始终为固定 ID `latest:evolution`，指向最新进化体，对编排层友好。
+    后续为各共轭 Agent 历史快照。
+    """
     from evolution.conjugate_agent import list_conjugate_agents
 
     _http_base, ws_base = _provider_public_urls()
@@ -140,24 +144,51 @@ def _list_provider_agents() -> list[dict]:
         logger.exception("Failed to load conjugate agents for provider agents")
         return [
             {
-                "external_agent_id": "default:common",
-                "agent_name": "DefaultAgent",
+                "external_agent_id": "latest:evolution",
+                "agent_name": "LatestEvolution",
                 "client_type": "ws",
                 "client_url": ws_base,
                 "model_name": "werewolf-agent-langgraph",
-                "version": "default",
+                "version": "latest",
                 "health": "available",
                 "status": "available",
                 "metadata": {
-                    "mode": "default",
+                    "mode": "latest-evolution",
+                    "is_latest": True,
                     "role_scope": "all",
                     "skill_count": 0,
                     "partial": True,
                 },
             }
         ]
+
     latest_id = agents[0].id if agents else None
-    return [
+    latest_agent = agents[0] if agents else None
+
+    # 固定 ID 条目：始终指向最新进化体
+    latest_entry = {
+        "external_agent_id": "latest:evolution",
+        "agent_name": latest_agent.agent_name if latest_agent else "LatestEvolution",
+        "client_type": "ws",
+        "client_url": ws_base,
+        "model_name": "werewolf-agent-langgraph",
+        "version": latest_agent.fingerprint[:16] if latest_agent else "latest",
+        "health": "available",
+        "status": "available",
+        "metadata": {
+            "mode": "latest-evolution",
+            "is_latest": True,
+            "fingerprint": latest_agent.fingerprint if latest_agent else "",
+            "born_at": latest_agent.born_at.isoformat() if latest_agent and latest_agent.born_at else "",
+            "avatar_seed": latest_agent.avatar_seed if latest_agent else "",
+            "skill_versions": latest_agent.skill_versions_json or {} if latest_agent else {},
+            "skill_count": len(latest_agent.skill_versions_json or {}) if latest_agent else 0,
+            "changelog": latest_agent.changelog if latest_agent else "",
+            "lore": latest_agent.lore if latest_agent else "",
+        },
+    }
+
+    conjugate_entries = [
         {
             "external_agent_id": f"agent:{agent.id}",
             "agent_name": agent.agent_name,
@@ -181,6 +212,8 @@ def _list_provider_agents() -> list[dict]:
         }
         for agent in agents
     ]
+
+    return [latest_entry] + conjugate_entries
 
 
 
@@ -211,7 +244,7 @@ async def _process_init(agent_id: str, role: str, teammates: list,
 
     request = {"status": "start", "message": ",".join(teammates), "round": 0}
     state = await run_perceive(initial, request)
-    store.create(session_id, state)
+    store.create(session_id, state, agent_id=agent_id)
     logger.info(f"Agent {agent_id} initialized as {role}, session={session_id}")
     return session_id, {
         "type": "init_ok",
@@ -225,6 +258,7 @@ async def _process_init(agent_id: str, role: str, teammates: list,
 async def _process_perceive(session_id: str, req_id: str, status: str,
                             message: str, round_num: int, traces: list) -> dict:
     """处理感知事件 (按 session_id 路由)."""
+    real_sid = store.resolve_session_id(session_id)
     state = store.get(session_id)
     if state is None:
         return {"type": "error", "req_id": req_id,
@@ -237,7 +271,7 @@ async def _process_perceive(session_id: str, req_id: str, status: str,
         "traces": traces or [],
     }
     new_state = await run_perceive(state, request)
-    store.set(session_id, new_state)
+    store.set(real_sid, new_state)
     return {"type": "perceive_ok", "req_id": req_id}
 
 
@@ -248,6 +282,7 @@ async def _process_act(session_id: str, agent_id: str, req_id: str, status: str,
     返回帧列表: reflection 非空时先下发一帧 thought (思考过程回传),
     再跟一帧 act_result.
     """
+    real_sid = store.resolve_session_id(session_id)
     state = store.get(session_id)
     if state is None:
         return [{"type": "error", "req_id": req_id,
@@ -260,7 +295,7 @@ async def _process_act(session_id: str, agent_id: str, req_id: str, status: str,
     }
     # LLM 调用是异步的，直接 await
     result = await run_act(state, req_dict)
-    store.set(session_id, result)
+    store.set(real_sid, result)
 
     frames = []
     thought = (result.get("last_thought") or "").strip()
