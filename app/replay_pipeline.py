@@ -50,6 +50,10 @@ def _determine_result(my_role: str, winner: str) -> str:
     return "lost" if my_role in wolf_roles else "won"
 
 
+def _strategy_role(role: str) -> str:
+    return "wolf" if role in {"wolf", "wolf_king"} else role
+
+
 def _timeline_to_events(timeline: list) -> list:
     """将 DB timeline 转换为 format_game_trace 期望的 events 格式。"""
     events = []
@@ -159,7 +163,20 @@ async def replay_pipeline(state: dict, result: str, winner_role: str,
 
         # 3. Load current strategies
         vm = VersionManager(cfg)
-        current_strategies = vm.format_skills_for_prompt(state["my_role"], state.get("phase", ""))
+        if not state.get("versions_used"):
+            strategy_role = _strategy_role(state["my_role"])
+            versions_used = {
+                skill["name"]: vm.get_version_for_game(skill["name"])
+                for skill in vm.loader.load_index()
+                if _strategy_role(str(skill.get("role") or "common")) in (strategy_role, "common")
+            }
+            state["versions_used"] = versions_used
+            state["strategies_used"] = list(versions_used.keys())
+        current_strategies = vm.format_skills_for_prompt(
+            state["my_role"],
+            state.get("phase", ""),
+            state.get("versions_used", {}),
+        )
 
         # 3.1 Initialize buffer pool
         pool = BufferPool(cfg)
@@ -225,6 +242,7 @@ async def replay_pipeline(state: dict, result: str, winner_role: str,
                 reflection_report=yaml.dump(asdict(reflection), allow_unicode=True, default_flow_style=False),
                 full_trace=game_trace,
                 strategies_used=state.get("strategies_used", []),
+                versions_used=state.get("versions_used", {}),
             )
             logger.info(f"[seat {seat_id}] Game archived")
 

@@ -48,6 +48,19 @@ def team_of(role: str) -> str:
     return "wolf" if role in WOLF_ROLES else "good"
 
 
+def strategy_role(role: str) -> str:
+    return "wolf" if role in WOLF_ROLES else role
+
+
+def build_versions_used(vm: VersionManager, role: str) -> dict:
+    role_key = strategy_role(role)
+    return {
+        skill["name"]: vm.get_version_for_game(skill["name"])
+        for skill in vm.loader.load_index()
+        if strategy_role(str(skill.get("role") or "common")) in (role_key, "common")
+    }
+
+
 def fetch_missed_games(session, limit=None, only_room=None):
     """返回需要重放的对局列表：故障期 finished 房间，且尚未被真实重放。"""
     sql = """
@@ -220,21 +233,24 @@ def main():
         n_ref = 0
         rep_role = None
         rep_day = 1
+        rep_versions_used = {}
         for seat in seats:
             role = roles.get(seat, "")
             if not role:
                 continue
             result = "won" if team_of(role) == winner else "lost"
             trace, max_day = build_seat_trace(g["events_json"], seat)
+            versions_used = build_versions_used(vm, role)
             if rep_role is None:
                 rep_role, rep_day = role, max_day
+                rep_versions_used = versions_used
             if args.dry_run:
                 logger.info(f"    seat={seat} role={role} result={result} "
                             f"trace_len={len(trace)} day={max_day}")
                 n_ref += 1
                 continue
 
-            current_strategies = vm.format_skills_for_prompt(role, "")
+            current_strategies = vm.format_skills_for_prompt(role, "", versions_used)
             reflection = engine.reflect(
                 game_id=room_id,
                 my_role=role,
@@ -263,7 +279,8 @@ def main():
                 scene_tags={"role": rep_role, "result": rep_result, "wolf_aggression": "unknown"},
                 reflection_report="replayed from transcript",
                 full_trace="",
-                strategies_used=[],
+                strategies_used=list(rep_versions_used.keys()),
+                versions_used=rep_versions_used,
             )
             mark_replayed(session, room_id, n_ref)
 

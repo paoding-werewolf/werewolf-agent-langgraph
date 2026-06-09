@@ -27,8 +27,9 @@ from evolution.conjugate_agent import (
     maybe_create_conjugate_agent,
 )
 from evolution.db import Base, engine, get_session
-from evolution.models import ConjugateAgent, EvolutionSkill, EvolutionSkillVersion
-from main_ws import _build_versions_used, _list_provider_agents, _process_game_over, store
+from evolution.models import ConjugateAgent, EvolutionGameArchive, EvolutionSkill, EvolutionSkillVersion
+from main_ws import _build_versions_used, _list_provider_agents, _process_game_over, _process_init, store
+from memory.game_archive import save_game
 
 
 def setup_module():
@@ -42,7 +43,7 @@ def setup_function():
         store._sessions.clear()
     session = get_session()
     try:
-        for model in (ConjugateAgent, EvolutionSkillVersion, EvolutionSkill):
+        for model in (EvolutionGameArchive, ConjugateAgent, EvolutionSkillVersion, EvolutionSkill):
             session.query(model).delete()
         session.commit()
     finally:
@@ -401,6 +402,43 @@ def test_latest_conjugate_agent_uses_live_version_competition(monkeypatch):
         "common-logic": "live-common-logic",
         "wolf-logic": "live-wolf-logic",
     }
+
+
+def test_process_init_persists_versions_and_strategy_names(monkeypatch):
+    _seed_initial_skills()
+
+    monkeypatch.setattr(
+        "main_ws._build_versions_used",
+        lambda role, external_agent_id=None: {"wolf-logic": "v1", "common-logic": "v1"},
+    )
+
+    session_id, _resp = asyncio.run(_process_init("1_wolf", "wolf", [], "req-1"))
+    state = store.get(session_id)
+
+    assert state["versions_used"] == {"wolf-logic": "v1", "common-logic": "v1"}
+    assert state["strategies_used"] == ["wolf-logic", "common-logic"]
+
+
+def test_save_game_archives_versions_used():
+    save_game(
+        game_id="game-1",
+        my_role="wolf",
+        result="won",
+        day_count=3,
+        scene_tags={"role": "wolf"},
+        reflection_report="report",
+        full_trace="trace",
+        strategies_used=["wolf-logic"],
+        versions_used={"wolf-logic": "v2"},
+    )
+
+    session = get_session()
+    try:
+        record = session.query(EvolutionGameArchive).filter_by(game_id="game-1").first()
+        assert record.payload_json["strategies_used"] == ["wolf-logic"]
+        assert record.payload_json["versions_used"] == {"wolf-logic": "v2"}
+    finally:
+        session.close()
 
 
 def test_game_over_skips_evolution_for_historical_conjugate(monkeypatch):

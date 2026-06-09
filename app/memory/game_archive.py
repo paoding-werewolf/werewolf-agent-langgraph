@@ -13,7 +13,8 @@ from evolution.models import EvolutionGameArchive, EvolutionStrategyGap
 
 def save_game(game_id: str, my_role: str, result: str, day_count: int,
               scene_tags: Dict, reflection_report: str, full_trace: str,
-              strategies_used: List[str]):
+              strategies_used: List[str],
+              versions_used: Optional[Dict[str, str]] = None):
     """保存一局对局记录。"""
     has_builtin_ai = False
 
@@ -22,6 +23,7 @@ def save_game(game_id: str, my_role: str, result: str, day_count: int,
         "reflection_report": reflection_report,
         "full_trace": full_trace,
         "strategies_used": strategies_used,
+        "versions_used": versions_used or {},
     }
 
     session = get_session()

@@ -198,8 +198,16 @@ async def _process_init(agent_id: str, role: str, teammates: list,
 
     try:
         initial["versions_used"] = _build_versions_used(role, external_agent_id)
+        initial["strategies_used"] = list(initial["versions_used"].keys())
     except Exception:
+        logger.exception(
+            "Failed to build versions_used during init: agent_id=%s role=%s external_agent_id=%s",
+            agent_id,
+            role,
+            external_agent_id,
+        )
         initial["versions_used"] = {}
+        initial["strategies_used"] = []
 
     request = {"status": "start", "message": ",".join(teammates), "round": 0}
     state = await run_perceive(initial, request)
@@ -647,7 +655,9 @@ async def _run_post_game_pipeline(state: dict, result: str,
         # 3. Load current strategies
         vm = VersionManager(cfg)
         current_strategies = vm.format_skills_for_prompt(
-            state["my_role"], state.get("phase", "")
+            state["my_role"],
+            state.get("phase", ""),
+            state.get("versions_used", {}),
         )
 
         # 3.1 Initialize buffer pool (shared for ingest + expire)
@@ -704,6 +714,7 @@ async def _run_post_game_pipeline(state: dict, result: str,
                 reflection_report=yaml.dump(asdict(reflection), allow_unicode=True, default_flow_style=False),
                 full_trace=game_trace,
                 strategies_used=state.get("strategies_used", []),
+                versions_used=state.get("versions_used", {}),
             )
 
         # 10. Update self model (sync LLM → to_thread to avoid blocking event loop)
