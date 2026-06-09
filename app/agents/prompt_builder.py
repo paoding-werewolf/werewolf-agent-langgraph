@@ -90,8 +90,18 @@ class PromptBuilder:
         if strategy_text:
             prompt += f"\n---\n## Active Strategies (Evolved)\n{strategy_text}\n---"
 
-        if include_thinking_framework and not self.agent_role.is_wolf_team:
-            prompt += f"""
+        if include_thinking_framework:
+            if self.agent_role.is_wolf_team:
+                prompt += f"""
+
+---
+This is a thinking framework for the wolf team, for reference only. It may not match your current day/night phase. Do not apply it rigidly:
+``` Wolf Team Thinking Framework
+{prompt_storage.WOLF_THINKING_FRAMEWORK}
+```
+---"""
+            else:
+                prompt += f"""
 
 ---
 This is a thinking framework for the villager role during daytime discussion, for reference only. It may not match your current role or day/night phase. Do not apply it rigidly:
@@ -131,11 +141,20 @@ This is a thinking framework for the villager role during daytime discussion, fo
 {personality_prompt}
 """
 
+        identity = prompt_storage.ROLE_IDENTITIES.get(viewpoint_role_str, "")
+        identity_section = ""
+        if identity:
+            identity_section = f"""
+
+### 角色身份卡
+{identity}
+"""
+
         return f"""
 ### 核心任务
 你正在玩狼人杀游戏。你的角色是 【{viewpoint_role_str}】, 你的编号是 【{self.agent_id}】.
 你的核心任务是：分析所有信息并为你所在的阵营 ({camp}).
-{personality_section}"""
+{identity_section}{personality_section}"""
 
     def get_game_info(self, state: AgentGameState, extra_data: Optional[Dict[str, Any]] = None) -> str:
         """第二部分：游戏信息"""
