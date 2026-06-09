@@ -2,6 +2,7 @@ import os
 import sys
 import tempfile
 import asyncio
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "app"))
 
@@ -11,17 +12,32 @@ os.environ["DATABASE_URL"] = f"sqlite:///{_tmp_db.name}"
 os.environ["PROVIDER_PUBLIC_HTTP_URL"] = "http://provider.test:8083"
 os.environ["PROVIDER_PUBLIC_WS_URL"] = "ws://provider.test:8082"
 
-from evolution.conjugate_agent import maybe_create_conjugate_agent
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+import evolution.db as evolution_db
+
+_test_engine = create_engine(os.environ["DATABASE_URL"])
+evolution_db.engine = _test_engine
+evolution_db.SessionLocal = sessionmaker(bind=_test_engine, autoflush=False, autocommit=False)
+
+from evolution.conjugate_agent import (
+    _parse_json_object,
+    backfill_conjugate_agent_identities,
+    maybe_create_conjugate_agent,
+)
 from evolution.db import Base, engine, get_session
 from evolution.models import ConjugateAgent, EvolutionSkill, EvolutionSkillVersion
 from main_ws import _build_versions_used, _list_provider_agents, _process_game_over, store
 
 
 def setup_module():
+    _assert_sqlite_test_db()
     Base.metadata.create_all(bind=engine)
 
 
 def setup_function():
+    _assert_sqlite_test_db()
     with store._lock:
         store._sessions.clear()
     session = get_session()
@@ -31,6 +47,23 @@ def setup_function():
         session.commit()
     finally:
         session.close()
+
+
+@pytest.fixture(autouse=True)
+def mock_agent_identity_llm(monkeypatch):
+    def fake_llm_identity(facts):
+        return {
+            "agent_name": str(facts.get("fallback_agent_name") or "影刃"),
+            "changelog": str(facts.get("fallback_changelog") or "策略发生晋升。"),
+            "lore": "测试环境生成的共轭 Agent 人设。",
+        }
+
+    monkeypatch.setattr("evolution.conjugate_agent._generate_agent_identity_with_llm", fake_llm_identity)
+
+
+def _assert_sqlite_test_db():
+    assert engine.url.get_backend_name() == "sqlite"
+    assert str(engine.url.database).endswith(".db")
 
 
 def _add_skill(session, name: str, role: str, current_default: str, versions: list[str]):
@@ -82,6 +115,220 @@ def _promote_wolf_logic():
         session.close()
 
 
+def test_identity_parser_handles_fenced_json():
+    parsed = _parse_json_object(
+        """```json
+{
+  "agent_name": "霜牙",
+  "changelog": "wolf-logic 从 v1 到 v2。",
+  "lore": "她从旧影中醒来。"
+}
+```"""
+    )
+
+    assert parsed["agent_name"] == "霜牙"
+    assert "wolf-logic" in parsed["changelog"]
+    assert "旧影" in parsed["lore"]
+
+
+def test_identity_parser_recovers_unescaped_quotes_in_fields():
+    parsed = _parse_json_object(
+        """
+模型输出如下：
+{
+  "agent_name": "玄棘",
+  "changelog": "wolf-logic 从 v1 晋升到 v2，新增 "夜间击杀" 判断，移除旧直觉。",
+  "lore": "她学会在 "伪装" 的裂缝中追踪猎物。"
+}
+"""
+    )
+
+    assert parsed["agent_name"] == "玄棘"
+    assert '新增 "夜间击杀" 判断' in parsed["changelog"]
+    assert '"伪装"' in parsed["lore"]
+
+
+def test_identity_parser_repairs_loose_json():
+    parsed = _parse_json_object(
+        """
+{
+  agent_name: "雾裁",
+  changelog: "修复了狼人夜间击杀判断",
+  lore: "雾裁在旧档案的裂隙中醒来",
+}
+"""
+    )
+
+    assert parsed["agent_name"] == "雾裁"
+    assert "狼人夜间击杀" in parsed["changelog"]
+    assert "旧档案" in parsed["lore"]
+
+
+def test_promoted_conjugate_agent_identity_comes_from_llm(monkeypatch):
+    _seed_initial_skills()
+    _initial_external_agent_id()
+
+    def fake_identity(facts):
+        assert facts["trigger_skill_name"] == "wolf-logic"
+        assert facts["previous_version"] == "v1"
+        assert facts["new_version"] == "v2"
+        return {
+            "agent_name": "霜牙",
+            "changelog": "wolf-logic 从 v1 晋升到 v2，夜间击杀策略更重视发言矛盾和身份伪装成本。",
+            "lore": "霜牙继承了初代的夜色本能，却把旧日的直觉磨成冷白的齿锋。它不再只追逐暴露的猎物，而是在谎言的边缘等待伪装者露出呼吸。",
+        }
+
+    monkeypatch.setattr("evolution.conjugate_agent.generate_agent_identity", fake_identity)
+    promoted_id = _promote_wolf_logic()
+
+    session = get_session()
+    try:
+        agent = session.get(ConjugateAgent, promoted_id)
+        assert agent.agent_name == "霜牙"
+        assert "wolf-logic 从 v1 晋升到 v2" in agent.changelog
+        assert "继承了初代" in agent.lore
+    finally:
+        session.close()
+
+
+def test_initial_conjugate_agent_identity_comes_from_llm(monkeypatch):
+    _seed_initial_skills()
+
+    def fake_identity(facts):
+        assert facts["event_type"] == "genesis"
+        assert facts["trigger_skill_name"] == "initial-skill-library"
+        return {
+            "agent_name": "影刃",
+            "changelog": "初代共轭快照收束 wolf-logic、seer-logic 与 common-logic，建立夜战、查验和通用发言的基础策略人格。",
+            "lore": "影刃在第一夜之前醒来。它没有前代，却把狼人的低语、预言家的凝视与村民的犹疑压进同一枚指纹，像一柄尚未出鞘的黑刃等待第一场审判。",
+        }
+
+    monkeypatch.setattr("evolution.conjugate_agent.generate_agent_identity", fake_identity)
+    agent = _list_provider_agents()[0]
+
+    assert agent["agent_name"] == "影刃"
+    assert "初代共轭快照" in agent["metadata"]["changelog"]
+    assert "第一夜之前醒来" in agent["metadata"]["lore"]
+
+
+def test_backfill_legacy_identity(monkeypatch):
+    _seed_initial_skills()
+    session = get_session()
+    try:
+        first_version = session.query(EvolutionSkillVersion).first()
+        session.add(ConjugateAgent(
+            fingerprint="legacy-fingerprint",
+            agent_name="影刃-初纪",
+            avatar_seed="legacy-seed",
+            born_at=first_version.created_at,
+            skill_versions_json={
+                "common-logic": "v1",
+                "seer-logic": "v1",
+                "wolf-logic": "v1",
+            },
+            changelog="Genesis: initial skill library snapshot",
+            lore="",
+        ))
+        session.commit()
+    finally:
+        session.close()
+
+    def fake_identity(facts):
+        assert facts["event_type"] == "genesis_backfill"
+        return {
+            "agent_name": "夜裁",
+            "changelog": "旧初代快照已补齐为自然语言变更说明，保留三项基础 skill 的共轭组合。",
+            "lore": "夜裁从旧档案中苏醒，补回了遗失的人格与宣发叙事。",
+        }
+
+    monkeypatch.setattr("evolution.conjugate_agent.generate_agent_identity", fake_identity)
+    session = get_session()
+    try:
+        assert backfill_conjugate_agent_identities(session) == 1
+        session.commit()
+    finally:
+        session.close()
+
+    agent = _list_provider_agents()[0]
+
+    assert agent["agent_name"] == "夜裁"
+    assert "旧初代快照" in agent["metadata"]["changelog"]
+    assert "旧档案中苏醒" in agent["metadata"]["lore"]
+
+
+def test_legacy_identity_backfill_fallback_does_not_retry(monkeypatch):
+    _seed_initial_skills()
+    session = get_session()
+    try:
+        first_version = session.query(EvolutionSkillVersion).first()
+        session.add(ConjugateAgent(
+            fingerprint="legacy-fallback-fingerprint",
+            agent_name="影刃-初纪",
+            avatar_seed="legacy-seed",
+            born_at=first_version.created_at,
+            skill_versions_json={
+                "common-logic": "v1",
+                "seer-logic": "v1",
+                "wolf-logic": "v1",
+            },
+            changelog="Genesis: initial skill library snapshot",
+            lore="",
+        ))
+        session.commit()
+    finally:
+        session.close()
+
+    calls = {"count": 0}
+
+    def fail_identity(_facts):
+        calls["count"] += 1
+        raise RuntimeError("llm unavailable")
+
+    monkeypatch.setattr("evolution.conjugate_agent._generate_agent_identity_with_llm", fail_identity)
+
+    session = get_session()
+    try:
+        assert backfill_conjugate_agent_identities(session) == 1
+        session.commit()
+    finally:
+        session.close()
+
+    session = get_session()
+    try:
+        assert backfill_conjugate_agent_identities(session) == 0
+        session.commit()
+    finally:
+        session.close()
+
+    first = _list_provider_agents()[0]
+    second = _list_provider_agents()[0]
+
+    assert calls["count"] == 1
+    assert first["agent_name"] == "影刃-初纪"
+    assert first["metadata"]["lore"]
+    assert second["metadata"]["lore"] == first["metadata"]["lore"]
+
+
+def test_promoted_conjugate_agent_uses_fallback_when_llm_fails(monkeypatch):
+    _seed_initial_skills()
+    _initial_external_agent_id()
+
+    def fail_identity(_facts):
+        raise RuntimeError("llm unavailable")
+
+    monkeypatch.setattr("evolution.conjugate_agent._generate_agent_identity_with_llm", fail_identity)
+    promoted_id = _promote_wolf_logic()
+
+    session = get_session()
+    try:
+        agent = session.get(ConjugateAgent, promoted_id)
+        assert agent.agent_name
+        assert "wolf-logic 从 v1 晋升到 v2" in agent.changelog
+        assert agent.lore == ""
+    finally:
+        session.close()
+
+
 def _initial_external_agent_id() -> str:
     return _list_provider_agents()[0]["external_agent_id"]
 
@@ -103,7 +350,8 @@ def test_list_provider_agents_exposes_initial_conjugate_snapshot():
         "seer-logic": "v1",
         "wolf-logic": "v1",
     }
-    assert agent["metadata"]["changelog"] == "Genesis: initial skill library snapshot"
+    assert agent["metadata"]["changelog"]
+    assert agent["metadata"]["lore"]
 
 
 def test_list_provider_agents_exposes_latest_and_historical_conjugates():
