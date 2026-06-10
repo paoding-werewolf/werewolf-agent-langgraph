@@ -2,6 +2,7 @@ import os
 import sys
 import tempfile
 import asyncio
+from datetime import datetime
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "app"))
@@ -220,12 +221,11 @@ def test_backfill_legacy_identity(monkeypatch):
     _seed_initial_skills()
     session = get_session()
     try:
-        first_version = session.query(EvolutionSkillVersion).first()
         session.add(ConjugateAgent(
             fingerprint="legacy-fingerprint",
             agent_name="影刃-初纪",
             avatar_seed="legacy-seed",
-            born_at=first_version.created_at,
+            born_at=datetime.utcnow(),
             skill_versions_json={
                 "common-logic": "v1",
                 "seer-logic": "v1",
@@ -266,12 +266,11 @@ def test_legacy_identity_backfill_fallback_does_not_retry(monkeypatch):
     _seed_initial_skills()
     session = get_session()
     try:
-        first_version = session.query(EvolutionSkillVersion).first()
         session.add(ConjugateAgent(
             fingerprint="legacy-fallback-fingerprint",
             agent_name="影刃-初纪",
             avatar_seed="legacy-seed",
-            born_at=first_version.created_at,
+            born_at=datetime.utcnow(),
             skill_versions_json={
                 "common-logic": "v1",
                 "seer-logic": "v1",
