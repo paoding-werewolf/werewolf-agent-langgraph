@@ -1205,7 +1205,7 @@ async def _evo_buffer(request):
 
 
 async def _evo_cluster_pending(request):
-    """手动触发：将 pending 建议聚类。"""
+    """手动触发：将 pending 建议聚类。与自动聚类共享锁，防止并发冲突。"""
     try:
         from evolution.config import load_config
         from evolution.buffer_pool import BufferPool
@@ -1218,7 +1218,8 @@ async def _evo_cluster_pending(request):
             clustered = clusterer.process_pending()
             return {"clustered": len(clustered)}
 
-        result = await asyncio.to_thread(_do)
+        async with _global_pass_lock:
+            result = await asyncio.to_thread(_do)
         return aiohttp_web.json_response(result)
     except Exception as e:
         return aiohttp_web.json_response({"detail": str(e)}, status=500)
