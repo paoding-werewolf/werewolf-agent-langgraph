@@ -1463,6 +1463,14 @@ async def _evo_gaps(request):
         return aiohttp_web.json_response({"detail": str(e)}, status=500)
 
 
+def _iso_utc(dt):
+    """datetime → ISO 字符串，始终带 +00:00 时区后缀。"""
+    if dt is None:
+        return None
+    s = dt.isoformat()
+    return s if ("+" in s or s.endswith("Z")) else s + "+00:00"
+
+
 async def _evo_games(request):
     try:
         from evolution.db import get_session
@@ -1490,7 +1498,8 @@ async def _evo_games(request):
                     )
                     for r in rooms_result:
                         if r[1]:
-                            room_finished_at[r[0]] = r[1].isoformat() if hasattr(r[1], 'isoformat') else str(r[1])
+                            _iso = r[1].isoformat() if hasattr(r[1], 'isoformat') else str(r[1])
+                            room_finished_at[r[0]] = _iso if "+" in _iso or "Z" in _iso else _iso + "+00:00"
 
                     result = session.execute(
                         text("SELECT room_id, round_count, duration_seconds, players_json, events_json FROM games WHERE room_id IN :ids"),
@@ -1556,7 +1565,7 @@ async def _evo_games(request):
                     "round_count": meta.get("round_count") or payload.get("round_count") or row.day_count,
                     "players_count": meta.get("players_count") or payload.get("players_count", len(payload.get("players") or [])),
                     "duration_seconds": meta.get("duration_seconds") or payload.get("duration_seconds", 0),
-                    "created_at": room_finished_at.get(row.game_id) or (row.created_at.isoformat() if row.created_at else None),
+                    "created_at": room_finished_at.get(row.game_id) or _iso_utc(row.created_at),
                     "players": meta.get("players") or payload.get("players") or [],
                     "has_builtin_ai": row.has_builtin_ai,
                 })
