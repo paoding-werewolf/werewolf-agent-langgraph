@@ -23,6 +23,7 @@ class AgentState(TypedDict):
     # Agent cognition
     last_thought: str
     next_action: Optional[Dict[str, Any]]
+    personality_prompt: str
 
     # Current request from game server
     request: Optional[Dict[str, Any]]
@@ -63,6 +64,7 @@ def make_initial_state(agent_id: str) -> AgentState:
         "events": [],
         "last_thought": "",
         "next_action": None,
+        "personality_prompt": "",
         "request": None,
         "working_memory": {
             "game_id": "unknown",

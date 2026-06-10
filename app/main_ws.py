@@ -259,8 +259,18 @@ def _list_provider_agents() -> list[dict]:
 
 
 
+def _parse_teammates(value) -> list[str]:
+    """兼容旧字符串协议和新列表协议。"""
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if not value:
+        return []
+    return [item.strip() for item in str(value).split(",") if item.strip()]
+
+
 async def _process_init(agent_id: str, role: str, teammates: list,
-                        req_id: str, external_agent_id: str | None = None) -> tuple[str, dict]:
+                        req_id: str, external_agent_id: str | None = None,
+                        game_context: dict | None = None) -> tuple[str, dict]:
     """初始化 agent: 铸造唯一 session_id, 创建初始状态并写入 SessionStore.
 
     返回 (session_id, response). session_id 作为该实例后续 perceive/act 的路由键.
@@ -270,6 +280,13 @@ async def _process_init(agent_id: str, role: str, teammates: list,
     initial["my_role"] = role
     initial["session_id"] = session_id
     initial["external_agent_id"] = external_agent_id or ""
+    context = game_context if isinstance(game_context, dict) else {}
+    initial["personality_prompt"] = str(context.get("personality") or "").strip()
+    room_id = str(context.get("room_id") or "").strip()
+    if room_id:
+        initial["room_id"] = room_id
+        if initial.get("working_memory"):
+            initial["working_memory"]["game_id"] = room_id
 
     try:
         initial["versions_used"] = _build_versions_used(role, external_agent_id)
@@ -387,10 +404,11 @@ async def handle_connection(ws: ServerConnection):
             if msg_type == "init":
                 agent_id = msg.get("agent_id", "")
                 role = msg.get("role", "villager")
-                teammates = msg.get("teammates", [])
+                teammates = _parse_teammates(msg.get("teammates", []))
                 external_agent_id = msg.get("external_agent_id")
+                game_context = msg.get("game_context") or {}
                 _session_id, resp = await _process_init(
-                    agent_id, role, teammates, req_id, external_agent_id
+                    agent_id, role, teammates, req_id, external_agent_id, game_context
                 )
 
             elif msg_type == "perceive":
@@ -974,10 +992,10 @@ async def _http_agent_init(request):
     agent_id = data.get("agent_id", "")
     role = data.get("role", "villager")
     external_agent_id = data.get("external_agent_id")
-    teammates_str = data.get("teammates", "")
-    teammates = [t.strip() for t in teammates_str.split(",") if t.strip()] if teammates_str else []
+    teammates = _parse_teammates(data.get("teammates", ""))
+    game_context = data.get("game_context") or {}
 
-    _sid, resp = await _process_init(agent_id, role, teammates, "http-0", external_agent_id)
+    _sid, resp = await _process_init(agent_id, role, teammates, "http-0", external_agent_id, game_context)
     return aiohttp_web.json_response(resp)
 
 

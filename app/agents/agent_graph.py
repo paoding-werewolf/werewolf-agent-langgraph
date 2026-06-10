@@ -29,6 +29,9 @@ def _get_evolution_strategies(state: AgentState) -> str:
 def _build_prompt_extra_data(state: AgentState) -> dict:
     """组装 PromptBuilder 需要的可选上下文。"""
     extra_data = {"evolution_strategies": _get_evolution_strategies(state)}
+    personality_prompt = str(state.get("personality_prompt") or "").strip()
+    if personality_prompt:
+        extra_data["personality_prompt"] = personality_prompt
     wm_data = state.get("working_memory")
     if wm_data:
         from memory.working_memory import WorkingMemory

@@ -615,6 +615,31 @@ def test_process_init_persists_versions_and_strategy_names(monkeypatch):
     assert state["strategies_used"] == ["wolf-logic", "common-logic"]
 
 
+def test_process_init_persists_personality_prompt_from_game_context(monkeypatch):
+    monkeypatch.setattr("main_ws._build_versions_used", lambda role, external_agent_id=None: {})
+    personality_prompt = (
+        "ISTJ·D｜思维模式 ISTJ：稳定履约。行为风格 Dominance（掌控型）：结果导向。"
+        "此风格只影响你的思考方式和表达形态，不改变你的阵营目标、角色职责、游戏规则或胜利条件。"
+    )
+
+    session_id, _resp = asyncio.run(_process_init(
+        "1_villager",
+        "villager",
+        ["2"],
+        "req-1",
+        game_context={
+            "room_id": "room-20240520",
+            "seat_id": "1",
+            "personality": personality_prompt,
+        },
+    ))
+    state = store.get(session_id)
+
+    assert state["room_id"] == "room-20240520"
+    assert state["working_memory"]["game_id"] == "room-20240520"
+    assert state["personality_prompt"] == personality_prompt
+
+
 def test_config_loads_confirmation_check_interval(monkeypatch, tmp_path):
     from evolution.config import load_config
 

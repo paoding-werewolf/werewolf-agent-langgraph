@@ -119,11 +119,20 @@ This is a thinking framework for the villager role during daytime discussion, fo
         else:
             camp = '好人阵营' if not self.agent_role.is_wolf_team else '狼人阵营'
 
+        personality_prompt = str((extra_data or {}).get("personality_prompt") or "").strip()
+        personality_section = ""
+        if personality_prompt:
+            personality_section = f"""
+
+### 表达风格
+{personality_prompt}
+"""
+
         return f"""
 ### 核心任务
 你正在玩狼人杀游戏。你的角色是 【{viewpoint_role_str}】, 你的编号是 【{self.agent_id}】.
 你的核心任务是：分析所有信息并为你所在的阵营 ({camp}).
-"""
+{personality_section}"""
 
     def get_game_info(self, state: AgentGameState, extra_data: Optional[Dict[str, Any]] = None) -> str:
         """第二部分：游戏信息"""

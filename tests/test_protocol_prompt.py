@@ -372,6 +372,34 @@ def test_prompt_extra_data_injects_working_memory_object():
     assert "2号：警长发言，我会归票。" in prompt
 
 
+def test_prompt_extra_data_injects_personality_prompt():
+    state = _state(request={"status": "discuss", "message": "请发言", "round": 1})
+    personality_prompt = (
+        "ENTJ·D｜思维模式 ENTJ：战略推进。行为风格 Dominance（掌控型）：结果导向。"
+        "此风格只影响你的思考方式和表达形态，不改变你的阵营目标、角色职责、游戏规则或胜利条件。"
+    )
+    state["personality_prompt"] = personality_prompt
+
+    extra_data = _build_prompt_extra_data(state)
+    prompt = PromptBuilder(Role.VILLAGER, "3").build_decision_prompt(
+        _to_agent_game_state(state),
+        "任务",
+        "最终指令",
+        extra_data=extra_data,
+        include_thinking_framework=False,
+    )
+
+    assert extra_data["personality_prompt"] == personality_prompt
+    assert "### 表达风格" in prompt
+    assert personality_prompt in prompt
+
+
+def test_prompt_omits_personality_section_when_empty():
+    prompt = PromptBuilder(Role.VILLAGER, "3")._get_core_task({})
+
+    assert "### 表达风格" not in prompt
+
+
 def test_parse_event_clears_sheriff_from_destroy_trace():
     state = _state(request={
         "status": "sheriff_transfer",
