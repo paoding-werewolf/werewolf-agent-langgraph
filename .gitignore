@@ -4,6 +4,9 @@ prompts_history.jsonl
 __pycache__/
 *.pyc
 .env
+.env.*
+!.env.example
 .DS_Store
 *.db
 *.tar.gz
+backups/

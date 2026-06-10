@@ -77,10 +77,9 @@ werewolf-service/                          # 本地开发根目录
 
 | Item | Value |
 |------|-------|
-| **Server IP** | `<server-ip>` |
-| **SSH** | `ssh <user>@<server-ip> -p <port>` (password: `REMOVED_SSH_PASSWORD`) |
-| **Source dirs** | `/root/werewolf-agent-langgraph/`, `/root/werewolf-service/` |
-| **CI/CD** | Drone CI at `:8090` — push to `main` triggers auto build+deploy |
+| **Server** | 已移除公网地址与 SSH 信息；请在私有运维文档中维护 |
+| **Source dirs** | 已移除服务器路径；请在私有运维文档中维护 |
+| **CI/CD** | 已移除公网入口；请在私有运维文档中维护 |
 
 ### Running Containers
 

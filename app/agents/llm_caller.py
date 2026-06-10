@@ -1,4 +1,5 @@
 import json
+import os
 import re
 from typing import Optional, Dict, Any
 
@@ -104,14 +105,29 @@ TOOLS = [
 
 class LLMCaller:
     def __init__(self):
-        self.api_key = "sk-REMOVED"
-        self.base_url = "https://claude35.shop/v1"
-        self.model = "deepseek-v4-pro"
+        self.api_key = os.getenv("OPENAI_API_KEY")
+        self.base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+        self.model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
         self.temperature = 0.7
+        self._async_client: Optional[AsyncOpenAI] = None
+        self._client: Optional[OpenAI] = None
 
-        self.async_client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url)
-        # Sync client kept for evolution modules that call llm.client directly
-        self.client = OpenAI(api_key=self.api_key, base_url=self.base_url)
+    def _require_api_key(self) -> str:
+        if not self.api_key:
+            raise RuntimeError("OPENAI_API_KEY is required for LLM calls")
+        return self.api_key
+
+    @property
+    def async_client(self) -> AsyncOpenAI:
+        if self._async_client is None:
+            self._async_client = AsyncOpenAI(api_key=self._require_api_key(), base_url=self.base_url)
+        return self._async_client
+
+    @property
+    def client(self) -> OpenAI:
+        if self._client is None:
+            self._client = OpenAI(api_key=self._require_api_key(), base_url=self.base_url)
+        return self._client
 
     async def _chat_with_tools(self, system_prompt: str, user_msg: str):
         resp = await self.async_client.chat.completions.create(
@@ -238,4 +254,18 @@ class LLMCaller:
     call_with_log_sync = call_with_log
 
 
-llm = LLMCaller()
+class _LazyLLMCaller:
+    """延迟初始化真实 LLM 客户端，避免无密钥时导入模块失败。"""
+
+    _instance: Optional[LLMCaller] = None
+
+    def _get_instance(self) -> LLMCaller:
+        if self._instance is None:
+            self._instance = LLMCaller()
+        return self._instance
+
+    def __getattr__(self, name: str):
+        return getattr(self._get_instance(), name)
+
+
+llm = _LazyLLMCaller()

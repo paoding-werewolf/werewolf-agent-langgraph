@@ -5,11 +5,15 @@ from pathlib import Path
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
-DEFAULT_MYSQL_URL = "mysql+pymysql://<db-user>:<db-password>@<db-host>:<db-port>/werewolf?charset=utf8mb4"
-DATABASE_URL = os.getenv("DATABASE_URL", DEFAULT_MYSQL_URL)
+DATA_DIR = Path(os.getenv("WEREWOLF_AGENT_HOME", Path.home() / ".werewolf-agent"))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+DEFAULT_DATABASE_URL = f"sqlite:///{DATA_DIR / 'evolution.db'}"
+DATABASE_URL = os.getenv("DATABASE_URL") or DEFAULT_DATABASE_URL
 
 engine = create_engine(
     DATABASE_URL,
+    connect_args={"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {},
     pool_pre_ping=True,
     pool_recycle=3600,
 )

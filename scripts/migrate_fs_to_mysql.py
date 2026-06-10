@@ -23,11 +23,13 @@ import yaml
 MYSQL_HOST = os.getenv("MYSQL_HOST", "127.0.0.1")
 MYSQL_PORT = int(os.getenv("MYSQL_PORT", "3306"))
 MYSQL_USER = os.getenv("MYSQL_USER", "root")
-MYSQL_PASS = os.getenv("MYSQL_PASS", "REMOVED_DB_PASSWORD")
+MYSQL_PASS = os.getenv("MYSQL_PASS")
 MYSQL_DB = os.getenv("MYSQL_DB", "werewolf")
 
 
 def get_conn():
+    if not MYSQL_PASS:
+        raise RuntimeError("MYSQL_PASS is required")
     return pymysql.connect(host=MYSQL_HOST, port=MYSQL_PORT, user=MYSQL_USER,
                            password=MYSQL_PASS, database=MYSQL_DB, charset="utf8mb4")
 

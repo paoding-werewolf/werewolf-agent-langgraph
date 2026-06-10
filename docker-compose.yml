@@ -10,6 +10,10 @@ services:
     restart: unless-stopped
     environment:
       - APP_ENV=production
+      - DATABASE_URL=${DATABASE_URL:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
       - WEREWOLF_AGENT_HOME=/root/.werewolf-agent
       - PROVIDER_PUBLIC_HOST=172.17.0.1
       - PROVIDER_PUBLIC_HTTP_PORT=8083
