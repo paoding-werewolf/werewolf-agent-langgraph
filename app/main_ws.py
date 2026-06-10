@@ -11,7 +11,7 @@ WebSocket Agent Service — 与 WebSocketAgentClient 配套的落地实现。
   SESSION_TTL_SECONDS) 的 session 会被后台清理.
 
   调试端点 (同端口 HTTP): GET /debug/prompts (JSON), GET /debug/view (HTML),
-  均支持 ?session_id= 过滤.
+  均支持 ?session_id= 和 ?external_agent_id= 过滤.
 
 协议:
   客户端 → 服务端:
@@ -472,14 +472,19 @@ def _http_response(status: http.HTTPStatus, body, content_type: str) -> Response
     return Response(status.value, status.phrase, headers, body)
 
 
+def _get_prompt_history(session_id: str | None = None, external_agent_id: str | None = None) -> list:
+    return prompt_logger.get_history(session_id=session_id, external_agent_id=external_agent_id)
+
+
 async def process_request(connection: ServerConnection, request: Request):
     """Serve the debug endpoints over plain HTTP on the same port as the WS server.
 
     Returning a Response short-circuits the WebSocket handshake; returning None
     lets the upgrade proceed normally so real agent clients still connect.
 
-    Both endpoints accept an optional ?session_id=... filter so a single
-    logical agent_id running multiple sessions can be inspected per session.
+    Both endpoints accept optional ?session_id=... and ?external_agent_id=...
+    filters so a single logical agent_id running multiple sessions can be
+    inspected per session or per conjugate agent.
       GET /debug/prompts -> JSON prompt history
       GET /debug/view    -> HTML prompt debugger
     """
@@ -497,14 +502,47 @@ async def process_request(connection: ServerConnection, request: Request):
     if parts.path not in ("/debug/prompts", "/debug/view"):
         return None
 
-    session_id = parse_qs(parts.query).get("session_id", [None])[0]
-    history = prompt_logger.get_history(session_id)
+    query = parse_qs(parts.query)
+    session_id = query.get("session_id", [None])[0]
+    external_agent_id = query.get("external_agent_id", [None])[0]
+    history = _get_prompt_history(session_id, external_agent_id)
 
     if parts.path == "/debug/prompts":
         body = json.dumps(history, ensure_ascii=False)
         return _http_response(http.HTTPStatus.OK, body, "application/json; charset=utf-8")
     return _http_response(
         http.HTTPStatus.OK, render_prompts_html(history), "text/html; charset=utf-8"
+    )
+
+
+async def _http_debug_prompts(request):
+    """GET /debug/prompts — HTTP 端口上的 JSON prompt history。"""
+    session_id = request.query.get("session_id")
+    external_agent_id = request.query.get("external_agent_id")
+    return aiohttp_web.json_response(
+        _get_prompt_history(session_id, external_agent_id),
+        dumps=lambda data: json.dumps(data, ensure_ascii=False),
+    )
+
+
+async def _http_debug_prompts_by_agent(request):
+    """GET /debug/prompts/by-agent/{external_agent_id} — 按 Agent 视角查询。"""
+    external_agent_id = request.match_info.get("external_agent_id", "")
+    return aiohttp_web.json_response(
+        prompt_logger.get_history_by_external_agent(external_agent_id),
+        dumps=lambda data: json.dumps(data, ensure_ascii=False),
+    )
+
+
+async def _http_debug_view(request):
+    """GET /debug/view — HTTP 端口上的 HTML prompt debugger。"""
+    session_id = request.query.get("session_id")
+    external_agent_id = request.query.get("external_agent_id")
+    history = _get_prompt_history(session_id, external_agent_id)
+    return aiohttp_web.Response(
+        text=render_prompts_html(history),
+        content_type="text/html",
+        charset="utf-8",
     )
 
 
@@ -992,6 +1030,9 @@ def _create_http_app():
     app.router.add_get("/", _http_health)
     app.router.add_get("/provider/health", _http_provider_health)
     app.router.add_get("/provider/agents", _http_provider_agents)
+    app.router.add_get("/debug/prompts", _http_debug_prompts)
+    app.router.add_get("/debug/prompts/by-agent/{external_agent_id}", _http_debug_prompts_by_agent)
+    app.router.add_get("/debug/view", _http_debug_view)
     app.router.add_post("/agent/init", _http_agent_init)
     app.router.add_post("/agent/perceive", _http_agent_perceive)
     app.router.add_post("/agent/act", _http_agent_act)

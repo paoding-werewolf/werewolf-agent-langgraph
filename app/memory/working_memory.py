@@ -5,8 +5,26 @@
 Token 预算：~2,000 tokens（滚动压缩）
 """
 import json
+import re
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, field
+
+
+SPEECH_STATUSES = {
+    "discussion",
+    "sheriff_election_speech",
+    "sheriff_pk_speech",
+    "last_words",
+}
+
+SPEECH_TRACE_ACTIONS = {
+    "speak",
+    "speech",
+    "discussion",
+    "last_words",
+    "sheriff_speech",
+    "sheriff_pk_speech",
+}
 
 
 @dataclass
@@ -40,9 +58,8 @@ class WorkingMemory:
             if content:
                 self.known_info.append(f"R{round_num}: {content}")
 
-        elif status in ("discussion", "last_words"):
-            self.speeches.setdefault(day_key, {})
-            self.speeches[day_key]["summary"] = content
+        elif status in SPEECH_STATUSES:
+            self._append_speech(day_key, status, content, event)
 
         elif status in ("vote", "vote_result", "sheriff_election_vote", "sheriff_pk_vote_result"):
             self.actions.append(f"{day_key}_vote: {content}")
@@ -73,8 +90,8 @@ class WorkingMemory:
             lines.extend(f"- {info}" for info in self.known_info[-10:])
 
         if self.speeches:
-            lines.append("\n### Speech Summaries")
-            for day_key, day_speeches in sorted(self.speeches.items()):
+            lines.append("\n### Speech Timeline")
+            for day_key, day_speeches in sorted(self.speeches.items(), key=lambda item: self._day_sort_key(item[0])):
                 for speaker, content in day_speeches.items():
                     lines.append(f"- {day_key} {speaker}: {content}")
 
@@ -101,6 +118,70 @@ class WorkingMemory:
         if len(self.actions) > keep_recent * 2:
             old = self.actions[:-keep_recent]
             self.actions = [f"[Earlier: {len(old)} events compressed]"] + self.actions[-keep_recent:]
+
+    def _append_speech(self, day_key: str, status: str, content: str, event: Dict):
+        """按事件顺序追加发言，避免同一天多名玩家发言互相覆盖。"""
+        if not content:
+            return
+
+        day_speeches = self.speeches.setdefault(day_key, {})
+        sequence = len(day_speeches) + 1
+        speaker = self._extract_speaker(event)
+        phase_label = self._speech_phase_label(status)
+        speaker_label = self._format_speaker_label(speaker)
+
+        key = f"{phase_label}#{sequence:02d}"
+        if speaker_label:
+            key = f"{key} {speaker_label}"
+
+        while key in day_speeches:
+            sequence += 1
+            key = f"{phase_label}#{sequence:02d}"
+            if speaker_label:
+                key = f"{key} {speaker_label}"
+
+        day_speeches[key] = content
+
+    def _extract_speaker(self, event: Dict) -> Optional[str]:
+        """从 traces/extra/content 中提取发言人编号，提取不到则返回 None。"""
+        extra = event.get("extra") or {}
+        for key in ("speaker", "speaker_id", "player", "player_id", "from"):
+            value = extra.get(key) or event.get(key)
+            if value:
+                return str(value)
+
+        for trace in event.get("traces") or []:
+            action = trace.get("action")
+            if action in SPEECH_TRACE_ACTIONS and trace.get("from"):
+                return str(trace["from"])
+
+        content = str(event.get("content") or "")
+        match = re.match(r"\s*(?:玩家)?(\d{1,2})\s*号?\s*[：:,，\s]", content)
+        if match:
+            return match.group(1)
+        return None
+
+    def _speech_phase_label(self, status: str) -> str:
+        labels = {
+            "discussion": "发言",
+            "sheriff_election_speech": "警上发言",
+            "sheriff_pk_speech": "警长PK发言",
+            "last_words": "遗言",
+        }
+        return labels.get(status, status)
+
+    def _format_speaker_label(self, speaker: Optional[str]) -> str:
+        if not speaker:
+            return ""
+        if speaker.isdigit():
+            return f"{speaker}号"
+        return speaker
+
+    def _day_sort_key(self, day_key: str) -> tuple[int, str]:
+        match = re.match(r"D(\d+)$", day_key)
+        if match:
+            return int(match.group(1)), day_key
+        return 10**9, day_key
 
     def to_dict(self) -> Dict:
         return {

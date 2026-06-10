@@ -1,5 +1,6 @@
 import json
 import os
+from urllib.parse import unquote
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
@@ -48,11 +49,31 @@ class PromptLogger:
         if session_id:
             result = [e for e in result if e.get("session_id") == session_id]
         if external_agent_id:
-            result = [e for e in result if e.get("external_agent_id") == external_agent_id]
+            result = [e for e in result if self._external_agent_matches(e, external_agent_id)]
         return result
 
     def get_history_by_external_agent(self, external_agent_id: str):
-        return [e for e in self.history if e.get("external_agent_id") == external_agent_id]
+        return [e for e in self.history if self._external_agent_matches(e, external_agent_id)]
+
+    def _external_agent_matches(self, entry: Dict[str, Any], query: str) -> bool:
+        stored = self._normalize_external_agent_id(entry.get("external_agent_id"))
+        wanted = self._normalize_external_agent_id(query)
+        if not wanted:
+            return False
+        if stored == wanted:
+            return True
+        return self._conjugate_numeric_id(stored) == self._conjugate_numeric_id(wanted)
+
+    def _normalize_external_agent_id(self, value: Any) -> str:
+        return unquote(str(value or "").strip())
+
+    def _conjugate_numeric_id(self, value: str) -> Optional[str]:
+        if not value:
+            return None
+        if value.startswith("agent:"):
+            suffix = value.split(":", 1)[1]
+            return suffix if suffix.isdigit() else None
+        return value if value.isdigit() else None
 
 # 单例模式
 prompt_logger = PromptLogger()

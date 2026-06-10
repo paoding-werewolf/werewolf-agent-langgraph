@@ -33,8 +33,9 @@ from evolution.conjugate_agent import (
 )
 from evolution.db import Base, engine, get_session
 from evolution.models import ConjugateAgent, EvolutionGameArchive, EvolutionSkill, EvolutionSkillVersion
-from main_ws import _build_versions_used, _list_provider_agents, _process_game_over, _process_init, _run_global_evolution_pass, store
+from main_ws import _build_versions_used, _get_prompt_history, _list_provider_agents, _process_game_over, _process_init, _run_global_evolution_pass, store
 from memory.game_archive import save_game
+from utils.prompt_logger import prompt_logger
 
 
 def setup_module():
@@ -507,6 +508,38 @@ def test_list_provider_agents_exposes_initial_conjugate_snapshot():
     }
     assert conjugate["metadata"]["changelog"]
     assert conjugate["metadata"]["lore"]
+
+
+def test_prompt_history_filters_by_conjugate_external_agent_id_aliases():
+    original_history = prompt_logger.history
+    prompt_logger.history = [
+        {
+            "agent_id": "1_wolf",
+            "session_id": "s1",
+            "external_agent_id": "agent:42",
+            "phase": "discussion_reflect",
+            "system_prompt": "sys",
+            "user_msg": "user",
+            "response": "resp",
+        },
+        {
+            "agent_id": "2_wolf",
+            "session_id": "s2",
+            "external_agent_id": "agent:43",
+            "phase": "discussion_reflect",
+            "system_prompt": "sys",
+            "user_msg": "user",
+            "response": "resp",
+        },
+    ]
+    try:
+        assert len(prompt_logger.get_history_by_external_agent("agent:42")) == 1
+        assert len(prompt_logger.get_history_by_external_agent("agent%3A42")) == 1
+        assert len(prompt_logger.get_history_by_external_agent("42")) == 1
+        assert len(_get_prompt_history(external_agent_id="agent:43")) == 1
+        assert _get_prompt_history(session_id="s1", external_agent_id="agent:43") == []
+    finally:
+        prompt_logger.history = original_history
 
 
 def test_list_provider_agents_exposes_latest_and_historical_conjugates():

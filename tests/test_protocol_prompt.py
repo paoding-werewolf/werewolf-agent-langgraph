@@ -3,12 +3,13 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + "/app")
 
-from agents.agent_graph import _parse_event, _route_by_phase, _to_agent_game_state
+from agents.agent_graph import _build_prompt_extra_data, _parse_event, _route_by_phase, _to_agent_game_state
 from agents.llm_caller import LLMCaller
 from agents.prompt_builder import PromptBuilder
 from agents.protocol import normalize_action_status, normalize_event_status, normalize_status
 from core.enums import Role
 from core.game_state import AgentGameState, PlayerPerception
+from memory.working_memory import WorkingMemory
 
 
 def _state(phase="discussion", request=None):
@@ -310,6 +311,65 @@ def test_parse_event_updates_sheriff_from_transfer_trace():
     assert new_state["sheriff"] == "4"
     assert game_state.players["4"].is_sheriff is True
     assert game_state.players["2"].is_sheriff is False
+
+
+def test_working_memory_keeps_multiple_speeches_in_same_day():
+    wm = WorkingMemory(game_id="room", my_role="villager", my_seat="3", day=1)
+
+    wm.update_from_event({
+        "status": "discussion",
+        "content": "1号：我是好人，先听后置位。",
+        "round": 1,
+        "traces": [{"from": "1", "to": None, "action": "speak"}],
+    })
+    wm.update_from_event({
+        "status": "discussion",
+        "content": "2号：警长发言，我会归票。",
+        "round": 1,
+        "traces": [{"from": "2", "to": None, "action": "speak"}],
+    })
+
+    prompt_text = wm.format_for_prompt()
+
+    assert len(wm.speeches["D1"]) == 2
+    assert "1号：我是好人，先听后置位。" in prompt_text
+    assert "2号：警长发言，我会归票。" in prompt_text
+
+
+def test_prompt_extra_data_injects_working_memory_object():
+    state = _state(request={"status": "discuss", "message": "请发言", "round": 1})
+    state["working_memory"] = {
+        "game_id": "room",
+        "my_role": "villager",
+        "my_seat": "3",
+        "day": 1,
+        "known_info": [],
+        "speeches": {
+            "D1": {
+                "发言#01 1号": "1号：我是好人，先听后置位。",
+                "发言#02 2号": "2号：警长发言，我会归票。",
+            }
+        },
+        "actions": [],
+        "my_speeches": {},
+        "contradictions": [],
+        "flags": [],
+        "suspicion": {"高": [], "中": [], "低": []},
+    }
+
+    extra_data = _build_prompt_extra_data(state)
+    prompt = PromptBuilder(Role.VILLAGER, "3").build_decision_prompt(
+        _to_agent_game_state(state),
+        "任务",
+        "最终指令",
+        extra_data=extra_data,
+        include_thinking_framework=False,
+    )
+
+    assert isinstance(extra_data["working_memory"], WorkingMemory)
+    assert "### Speech Timeline" in prompt
+    assert "1号：我是好人，先听后置位。" in prompt
+    assert "2号：警长发言，我会归票。" in prompt
 
 
 def test_parse_event_clears_sheriff_from_destroy_trace():
