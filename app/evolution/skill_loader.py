@@ -235,7 +235,11 @@ class SkillLoader:
             skill = session.query(EvolutionSkill).filter_by(skill_name=skill_name).first()
             if not skill:
                 if not role:
-                    role = skill_name.split("-", 1)[0] if "-" in skill_name else "common"
+                    if "-" in skill_name:
+                        role = skill_name.split("-", 1)[0]
+                    else:
+                        role = "unknown"
+                        logger.warning(f"Skill '{skill_name}' created without role — using 'unknown'")
                 skill = EvolutionSkill(
                     skill_name=skill_name,
                     role=role,

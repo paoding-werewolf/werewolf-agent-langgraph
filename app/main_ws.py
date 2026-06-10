@@ -1074,11 +1074,15 @@ async def _process_force_confirm(session_id: str, req_id: str,
                     "detail": "Cluster has no target_skill or suggestions"}
 
         new_content = judge._synthesize_strategy(suggestions, target_skill)
+        scene_role = (cluster.get("scene_tags") or {}).get("role", "")
+        if "_" in scene_role:
+            scene_role = scene_role.split("_")[0]
         version_name = vm.create_new_version(
             skill_name=target_skill,
             content=new_content,
             source="manual_force_confirm",
             trigger_cluster=cluster_id,
+            role=scene_role,
         )
         pool.move_to_confirmed(cluster_id)
 
