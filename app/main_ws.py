@@ -1476,11 +1476,22 @@ async def _evo_games(request):
             ).limit(limit).all()
 
             # 批量从 games 表补充元数据（players_count, round_count, duration_seconds, winner）
+            # 同时从 rooms 表取 finished_at，对齐主面板时间
             game_ids = [row.game_id for row in rows]
             games_meta = {}
+            room_finished_at = {}
             if game_ids:
                 try:
                     import json as _json
+                    # rooms.finished_at 作为权威对局结束时间
+                    rooms_result = session.execute(
+                        text("SELECT room_id, finished_at FROM rooms WHERE room_id IN :ids"),
+                        {"ids": tuple(game_ids)},
+                    )
+                    for r in rooms_result:
+                        if r[1]:
+                            room_finished_at[r[0]] = r[1].isoformat() if hasattr(r[1], 'isoformat') else str(r[1])
+
                     result = session.execute(
                         text("SELECT room_id, round_count, duration_seconds, players_json, events_json FROM games WHERE room_id IN :ids"),
                         {"ids": tuple(game_ids)},
@@ -1545,7 +1556,7 @@ async def _evo_games(request):
                     "round_count": meta.get("round_count") or payload.get("round_count") or row.day_count,
                     "players_count": meta.get("players_count") or payload.get("players_count", len(payload.get("players") or [])),
                     "duration_seconds": meta.get("duration_seconds") or payload.get("duration_seconds", 0),
-                    "created_at": row.created_at.isoformat() if row.created_at else None,
+                    "created_at": room_finished_at.get(row.game_id) or (row.created_at.isoformat() if row.created_at else None),
                     "players": meta.get("players") or payload.get("players") or [],
                     "has_builtin_ai": row.has_builtin_ai,
                 })
