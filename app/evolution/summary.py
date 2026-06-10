@@ -24,6 +24,13 @@ from agents.llm_caller import LLMCaller
 
 logger = logging.getLogger("evolution.summary")
 
+ROLE_LABELS = {
+    "wolf": "狼人", "wolf_king": "狼王",
+    "seer": "预言家", "witch": "女巫",
+    "guard": "守卫", "hunter": "猎人",
+    "villager": "村民",
+}
+
 
 class EvolutionSummary:
     """自进化系统活动摘要生成器。"""
@@ -121,10 +128,14 @@ class EvolutionSummary:
             results = []
             for v in rows:
                 skill = session.query(EvolutionSkill).filter_by(id=v.skill_id).first()
+                role = skill.role if skill else "unknown"
                 results.append({
                     "skill_name": skill.skill_name if skill else str(v.skill_id),
+                    "role": role,
+                    "role_label": ROLE_LABELS.get(role, role),
                     "version": v.version,
                     "source": v.source,
+                    "source_label": "对局反思自动确认" if v.source == "debounced_update" else "手动确认",
                     "trigger_cluster_id": v.trigger_cluster_id,
                     "created_at": v.created_at.isoformat() if v.created_at else "",
                 })
@@ -148,10 +159,14 @@ class EvolutionSummary:
             results = []
             for v in rows:
                 skill = session.query(EvolutionSkill).filter_by(id=v.skill_id).first()
+                role = skill.role if skill else "unknown"
                 results.append({
                     "skill_name": skill.skill_name if skill else str(v.skill_id),
+                    "role": role,
+                    "role_label": ROLE_LABELS.get(role, role),
                     "version": v.version,
                     "status": v.status,
+                    "status_label": "已晋升为活跃版本" if v.status == "active" else "已被新版本取代",
                     "games_played": v.games_played,
                     "wins": v.wins,
                     "win_rate": float(v.win_rate or 0),
@@ -175,12 +190,23 @@ class EvolutionSummary:
             )
             results = []
             for item in rows:
+                payload = dict(item.payload_json) if item.payload_json else {}
+                target_skill = item.target_skill_name or payload.get("target_skill", "")
+                # 从 skill name 推断角色
+                role = ""
+                skill = session.query(EvolutionSkill).filter_by(skill_name=target_skill).first()
+                if skill and skill.role:
+                    role = skill.role
                 results.append({
                     "cluster_id": item.cluster_id or "",
-                    "target_skill_name": item.target_skill_name or "",
+                    "target_skill_name": target_skill,
+                    "role": role,
+                    "role_label": ROLE_LABELS.get(role, role),
                     "suggestion_count": item.suggestion_count,
                     "consistency_rate": float(item.consistency_rate or 0),
                     "avg_causal_strength": float(item.avg_causal_strength or 0),
+                    "preview_texts": item.preview_texts_json or payload.get("preview_texts", [])[:3],
+                    "scene_tags": item.scene_tags_json or payload.get("scene_tags", {}),
                 })
             return results
         finally:
@@ -296,7 +322,7 @@ class EvolutionSummary:
             for g in rows:
                 role = g.my_role or "unknown"
                 if role not in by_role:
-                    by_role[role] = {"total": 0, "win": 0, "loss": 0}
+                    by_role[role] = {"total": 0, "win": 0, "loss": 0, "role_label": ROLE_LABELS.get(role, role)}
                 by_role[role]["total"] += 1
                 if g.result == "win":
                     by_role[role]["win"] += 1
@@ -322,30 +348,38 @@ class EvolutionSummary:
         llm.model = cfg.summary.model
 
         system_prompt = (
-            "你是狼人杀 AI 自进化系统的技术写手。"
-            "你的任务是根据系统活动的数据，写一段面向团队成员的中文总结。"
-            "写作风格：像团队周报一样，用自然流畅的中文讲述系统做了什么、发现了什么、改善了什么。\n\n"
-            "核心要求：\n"
-            "- 不要列举数据表格或编号列表，用叙述性语言串联信息\n"
-            "- 重点关注「变化」和「行动」，而非静态数据\n"
-            "- 如果某个模块没有活动，简单带过即可，不要说「本周期内无...」\n"
-            "- 开头用一句话概括本周期的整体节奏\n"
-            "- 每段聚焦一个主题，段落间自然过渡\n"
-            "- 用具体事实说话：哪个策略被更新了、因为什么、效果如何\n"
-            "- 如果系统发现了问题（如策略缺口），说明问题是什么、意味着什么\n\n"
-            "内容组织（按实际有内容的顺序写，没内容的跳过）：\n"
-            "1. 策略更新动态 — 哪些策略被改进/新增，基于什么信号\n"
-            "2. 版本竞争进展 — 候选版本表现如何，是否有版本晋升或降级\n"
-            "3. 缓冲池动态 — 新的建议在积累，哪些集群被确认通过\n"
-            "4. 发现的问题 — 策略缺口意味着什么场景缺乏指导\n"
-            "5. 策展人工作 — 上次做了什么维护操作\n"
-            "6. GEPA 进化 — 是否运行，产生了什么新策略，重点描述哪个角色的哪个策略"
-            "被变异或交叉，以及 Pareto 前沿变化\n"
-            "7. 整体对局表现 — 近期胜负趋势，各角色表现概览"
+            "你是狼人杀 AI 自进化系统的可爱小助理 🎀，负责向团队生动地汇报系统最近发生了什么。\n"
+            "你的任务是把枯燥的数据变成有趣的故事，让每个人都能轻松听懂系统在「想什么」、在「做什么」。\n\n"
+            "写作风格：\n"
+            "- 语气元气满满，像跟朋友聊天一样，可以适度使用 emoji 增加亲和力\n"
+            "- 用通俗易懂的语言解释概念：不说「一致性达标」，说「大家想法一致了，可以放心更新」\n"
+            "- 不要罗列数据或编号，把数字融入叙述中，让它有温度\n"
+            "- 每段聚焦一个主题，说说发生了什么、意味着什么、接下来值得关注什么\n"
+            "- 如果某个模块没活动就简单带过，不要僵硬地说「本周期无...」\n"
+            "- 开头用一个活泼的句子概括整体节奏（如「最近系统忙得飞起 ✨」「这段时间系统在悄悄成长呢～」）\n\n"
+            "关键要求：\n"
+            "- 用具体事实说话：XX角色的XX策略在XX场景下变得更强了，说清楚「为什么」和「体现在哪」\n"
+            "- 发现的问题要解释清楚意味着什么，让外行也能理解\n"
+            "- 提及策略时务必带上角色信息（如「预言家的查人策略」「狼人的悍跳策略」）\n"
+            "- 说到版本竞争时，要讲出「谁超越了谁」「新版本比旧版本好在哪」\n"
+            "- 说到 GEPA 时，要讲出「哪些角色受益最大」「进化出了什么新招式」\n"
+            "- 说到对局表现时，点出「哪些角色最近状态火热」「哪些角色需要加练」\n\n"
+            "内容组织（按实际有内容的顺序写，没内容就跳过）：\n"
+            "1. 策略更新动态 🆕 — 哪些策略被改进/新增了，基于什么信号，预计会带来什么变化\n"
+            "2. 版本竞争进展 ⚔️ — 候选版本表现如何，谁晋升了、谁被淘汰了，胜负变化说明了什么\n"
+            "3. 缓冲池动态 💡 — 有什么新洞察在积累，哪些集群被确认通过，代表系统学会了什么\n"
+            "4. 发现的问题 🔍 — 策略缺口说明在什么场景下 AI 还不太会玩，需要重点补课\n"
+            "5. 策展人工作 🧹 — 策展人做了哪些维护（版本降级、归档等），保持了什么秩序\n"
+            "6. GEPA 进化 🧬 — 离线进化跑了吗，产生了什么有意思的新策略，哪个角色进化最明显\n"
+            "7. 整体对局表现 📊 — 近期胜负趋势，各角色表现亮点和槽点\n\n"
+            "最后如果整体没有太多动态，不要生硬总结，直接说「这段时间系统比较安静，大家都在积蓄能量呢～」即可。"
         )
 
         user_prompt = (
             f"统计周期起始时间：{since}\n\n"
+            f"写的时候注意：要把策略名称和它的角色关联起来（数据里 [角色名] 标好了），"
+            f"讲清楚「谁」的「什么策略」在「什么场景下」发生了什么变化。"
+            f"不要列数据，要用故事化的方式描述。\n\n"
             f"以下是自进化系统在该周期内的活动数据：\n\n"
             f"=== 策略版本确认 ===\n{self._format_new_versions(activities['new_versions'])}\n\n"
             f"=== 版本竞争结果 ===\n{self._format_promoted_versions(activities['promoted_versions'])}\n\n"
@@ -363,7 +397,7 @@ class EvolutionSummary:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
-                temperature=0.3,
+                temperature=0.7,
             )
             content = resp.choices[0].message.content or ""
             if content and len(content) > 30:
@@ -383,11 +417,12 @@ class EvolutionSummary:
             return "（本周期内无策略版本确认）"
         lines = []
         for v in items:
-            cluster_info = f"，关联集群 {v['trigger_cluster_id']}" if v.get("trigger_cluster_id") else ""
+            role_label = v.get("role_label", "")
+            source_label = v.get("source_label", v.get("source", ""))
             lines.append(
-                f"- 策略「{v['skill_name']}」新增版本 {v['version']}，"
-                f"来源: {v['source']}{cluster_info}，"
-                f"创建时间: {v['created_at']}"
+                f"- [{role_label}] 策略「{v['skill_name']}」新增版本 {v['version']}，"
+                f"来源: {source_label}，创建时间: {v['created_at']}"
+                + (f"，关联集群 {v['trigger_cluster_id']}" if v.get("trigger_cluster_id") else "")
             )
         return "\n".join(lines)
 
@@ -396,10 +431,11 @@ class EvolutionSummary:
             return "（本周期内无版本竞争结果）"
         lines = []
         for v in items:
-            action = "晋升为活跃版本" if v["status"] == "active" else "被取代"
+            role_label = v.get("role_label", "")
+            status_label = v.get("status_label", v.get("status", ""))
             lines.append(
-                f"- 策略「{v['skill_name']}」版本 {v['version']} {action}，"
-                f"对局数 {v['games_played']}，胜率 {v['win_rate']:.0%}"
+                f"- [{role_label}] 策略「{v['skill_name']}」版本 {v['version']} {status_label}，"
+                f"对局数 {v['games_played']}，胜 {v.get('wins', 0)} 局，胜率 {v['win_rate']:.0%}"
             )
         return "\n".join(lines)
 
@@ -409,11 +445,13 @@ class EvolutionSummary:
         lines = []
         for c in items:
             target = c["target_skill_name"] or "未知策略"
+            role_label = c.get("role_label", "")
+            previews = c.get("preview_texts", [])
+            preview_line = f"，示例: {previews[0][:80]}" if previews else ""
             lines.append(
-                f"- 集群 {c['cluster_id']} → 目标策略「{target}」，"
-                f"建议数 {c['suggestion_count']}，"
-                f"一致率 {c['consistency_rate']:.0%}，"
-                f"平均因果强度 {c['avg_causal_strength']:.2f}"
+                f"- [{role_label}] 集群 {c['cluster_id']} → 「{target}」"
+                f"（建议数 {c['suggestion_count']}，一致率 {c['consistency_rate']:.0%}，因果强度 {c['avg_causal_strength']:.2f}）"
+                f"{preview_line}"
             )
         return "\n".join(lines)
 
@@ -422,7 +460,8 @@ class EvolutionSummary:
             return "（当前无显著策略缺口）"
         lines = []
         for g in items:
-            lines.append(f"- 场景「{g['scene_description']}」，出现 {g['gap_count']} 次")
+            lines.append(f"- 场景「{g['scene_description']}」出现 {g['gap_count']} 次，"
+                         f"说明系统在这些局面下还缺少清晰的策略指导")
         return "\n".join(lines)
 
     def _format_curator(self, data: Dict) -> str:
@@ -555,9 +594,10 @@ class EvolutionSummary:
             for role, stats in by_role.items():
                 r_total = stats["total"]
                 r_win = stats["win"]
+                role_label = stats.get("role_label", role)
                 lines.append(
-                    f"  - {role}: {r_total} 局，胜 {r_win}，"
-                    f"胜率 {r_win / r_total:.0%}" if r_total > 0 else f"  - {role}: 0 局"
+                    f"  - {role_label}（{role}）: {r_total} 局，胜 {r_win}，"
+                    f"胜率 {r_win / r_total:.0%}" if r_total > 0 else f"  - {role_label}: 0 局"
                 )
         return "\n".join(lines)
 
