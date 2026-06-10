@@ -23,13 +23,17 @@ evolution_db.engine = _test_engine
 evolution_db.SessionLocal = sessionmaker(bind=_test_engine, autoflush=False, autocommit=False)
 
 from evolution.conjugate_agent import (
+    _generate_agent_identity_with_llm,
     _parse_json_object,
+    _normalize_identity,
     backfill_conjugate_agent_identities,
+    fallback_agent_name,
+    generate_agent_identity,
     maybe_create_conjugate_agent,
 )
 from evolution.db import Base, engine, get_session
 from evolution.models import ConjugateAgent, EvolutionGameArchive, EvolutionSkill, EvolutionSkillVersion
-from main_ws import _build_versions_used, _list_provider_agents, _process_game_over, _process_init, store
+from main_ws import _build_versions_used, _list_provider_agents, _process_game_over, _process_init, _run_global_evolution_pass, store
 from memory.game_archive import save_game
 
 
@@ -166,6 +170,108 @@ def test_identity_parser_repairs_loose_json():
     assert "旧档案" in parsed["lore"]
 
 
+def test_fallback_agent_name_matches_identity_spec():
+    previous = type("PreviousAgent", (), {"id": 16})()
+
+    assert fallback_agent_name(None) == "影刃"
+    assert fallback_agent_name(previous) == "玄影刃"
+    assert "-" not in fallback_agent_name(previous)
+    assert len(fallback_agent_name(previous)) in (2, 3)
+
+
+def test_identity_normalization_rejects_legacy_epoch_name():
+    identity = _normalize_identity(
+        {
+            "agent_name": "雾裁-七纪-4",
+            "changelog": "common-logic 从 v1 晋升到 v2。",
+            "lore": "旧格式名称应被兜底名替换。",
+        },
+        {
+            "existing_agent_names": [],
+            "fallback_agent_name": "玄棘",
+            "fallback_changelog": "兜底变更记录。",
+            "fallback_lore": "兜底人设。",
+        },
+    )
+
+    assert identity["agent_name"] == "玄棘"
+    assert identity["changelog"] == "common-logic 从 v1 晋升到 v2。"
+    assert identity["lore"] == "旧格式名称应被兜底名替换。"
+
+
+def test_generate_agent_identity_retries_until_valid(monkeypatch):
+    calls = {"count": 0}
+    sleeps = []
+
+    def flaky_identity(_facts):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise RuntimeError("llm unavailable")
+        if calls["count"] == 2:
+            return {"agent_name": "雾裁-七纪-4", "changelog": "非法名称", "lore": "非法名称"}
+        return {
+            "agent_name": "归衡",
+            "changelog": "wolf-logic 从 v1 晋升到 v2，重试后生成了合规变更记录。",
+            "lore": "归衡在重试后补齐了合规身份描述。",
+        }
+
+    monkeypatch.setattr("evolution.conjugate_agent._generate_agent_identity_with_llm", flaky_identity)
+    monkeypatch.setattr("evolution.conjugate_agent._identity_retry_initial_seconds", lambda: 0.1)
+    monkeypatch.setattr("evolution.conjugate_agent._identity_retry_max_seconds", lambda: 1.0)
+    monkeypatch.setattr("evolution.conjugate_agent.time.sleep", lambda delay: sleeps.append(delay))
+
+    identity = generate_agent_identity(
+        {
+            "existing_agent_names": [],
+            "fallback_agent_name": "霜牙",
+            "fallback_changelog": "兜底变更记录。",
+            "fallback_lore": "兜底人设。",
+        }
+    )
+
+    assert identity["agent_name"] == "归衡"
+    assert calls["count"] == 3
+    assert sleeps == [0.1, 0.2]
+
+
+def test_identity_llm_uses_default_model_when_env_model_missing(monkeypatch):
+    class FakeMessage:
+        content = '{"agent_name":"衡墨","changelog":"默认模型生成变更记录。","lore":"默认模型生成身份描述。"}'
+
+    class FakeChoice:
+        message = FakeMessage()
+
+    class FakeCompletions:
+        def __init__(self):
+            self.model = None
+
+        def create(self, **kwargs):
+            self.model = kwargs["model"]
+            return type("Resp", (), {"choices": [FakeChoice()]})()
+
+    class FakeChat:
+        def __init__(self):
+            self.completions = FakeCompletions()
+
+    class FakeClient:
+        def __init__(self):
+            self.chat = FakeChat()
+
+    class FakeLLM:
+        model = None
+        client = FakeClient()
+
+    fake_llm = FakeLLM()
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+    monkeypatch.setattr("agents.llm_caller.llm", fake_llm)
+
+    identity = _generate_agent_identity_with_llm({})
+
+    assert identity["agent_name"] == "衡墨"
+    assert fake_llm.model == "deepseek-v4-pro"
+    assert fake_llm.client.chat.completions.model == "deepseek-v4-pro"
+
+
 def test_promoted_conjugate_agent_identity_comes_from_llm(monkeypatch):
     _seed_initial_skills()
     _initial_external_agent_id()
@@ -262,7 +368,7 @@ def test_backfill_legacy_identity(monkeypatch):
     assert "旧档案中苏醒" in agent["metadata"]["lore"]
 
 
-def test_legacy_identity_backfill_fallback_does_not_retry(monkeypatch):
+def test_legacy_identity_backfill_retries_until_valid(monkeypatch):
     _seed_initial_skills()
     session = get_session()
     try:
@@ -284,12 +390,21 @@ def test_legacy_identity_backfill_fallback_does_not_retry(monkeypatch):
         session.close()
 
     calls = {"count": 0}
+    sleeps = []
 
-    def fail_identity(_facts):
+    def flaky_identity(_facts):
         calls["count"] += 1
-        raise RuntimeError("llm unavailable")
+        if calls["count"] == 1:
+            raise RuntimeError("llm unavailable")
+        return {
+            "agent_name": "回衡",
+            "changelog": "旧初代快照在重试后补齐为自然语言变更说明。",
+            "lore": "回衡从旧档案中苏醒，补回了遗失的人格与宣发叙事。",
+        }
 
-    monkeypatch.setattr("evolution.conjugate_agent._generate_agent_identity_with_llm", fail_identity)
+    monkeypatch.setattr("evolution.conjugate_agent._generate_agent_identity_with_llm", flaky_identity)
+    monkeypatch.setattr("evolution.conjugate_agent._identity_retry_initial_seconds", lambda: 0.1)
+    monkeypatch.setattr("evolution.conjugate_agent.time.sleep", lambda delay: sleeps.append(delay))
 
     session = get_session()
     try:
@@ -308,29 +423,43 @@ def test_legacy_identity_backfill_fallback_does_not_retry(monkeypatch):
     first = _list_provider_agents()[0]
     second = _list_provider_agents()[0]
 
-    assert calls["count"] == 1
-    assert first["agent_name"] == "001影刃-初纪"
-    assert first["metadata"]["base_agent_name"] == "影刃-初纪"
-    assert first["metadata"]["lore"]
+    assert calls["count"] == 2
+    assert sleeps == [0.1]
+    assert first["agent_name"] == "001回衡"
+    assert first["metadata"]["base_agent_name"] == "回衡"
+    assert "旧档案中苏醒" in first["metadata"]["lore"]
     assert second["metadata"]["lore"] == first["metadata"]["lore"]
 
 
-def test_promoted_conjugate_agent_uses_fallback_when_llm_fails(monkeypatch):
+def test_promoted_conjugate_agent_retries_when_llm_fails(monkeypatch):
     _seed_initial_skills()
     _initial_external_agent_id()
+    calls = {"count": 0}
+    sleeps = []
 
-    def fail_identity(_facts):
-        raise RuntimeError("llm unavailable")
+    def flaky_identity(_facts):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise RuntimeError("llm unavailable")
+        return {
+            "agent_name": "归衡",
+            "changelog": "wolf-logic 从 v1 晋升到 v2，重试后生成了合规变更记录。",
+            "lore": "归衡承接前代指纹，在 wolf-logic 晋升后补齐新身份。",
+        }
 
-    monkeypatch.setattr("evolution.conjugate_agent._generate_agent_identity_with_llm", fail_identity)
+    monkeypatch.setattr("evolution.conjugate_agent._generate_agent_identity_with_llm", flaky_identity)
+    monkeypatch.setattr("evolution.conjugate_agent._identity_retry_initial_seconds", lambda: 0.1)
+    monkeypatch.setattr("evolution.conjugate_agent.time.sleep", lambda delay: sleeps.append(delay))
     promoted_id = _promote_wolf_logic()
 
     session = get_session()
     try:
         agent = session.get(ConjugateAgent, promoted_id)
-        assert agent.agent_name
+        assert agent.agent_name == "归衡"
         assert "wolf-logic 从 v1 晋升到 v2" in agent.changelog
-        assert agent.lore == ""
+        assert "wolf-logic" in agent.lore
+        assert calls["count"] == 2
+        assert sleeps == [0.1]
     finally:
         session.close()
 
@@ -356,19 +485,19 @@ def test_list_provider_agents_exposes_initial_conjugate_snapshot():
     assert fixed["external_agent_id"] == "latest:evolution"
     assert fixed["metadata"]["mode"] == "latest-evolution"
     assert fixed["metadata"]["is_latest"] is True
-    assert fixed["agent_name"] == "001影刃-初纪"
-    assert fixed["metadata"]["base_agent_name"] == "影刃-初纪"
-    assert fixed["metadata"]["display_name"] == "001影刃-初纪"
+    assert fixed["agent_name"] == "001影刃"
+    assert fixed["metadata"]["base_agent_name"] == "影刃"
+    assert fixed["metadata"]["display_name"] == "001影刃"
     assert fixed["metadata"]["lineage_index"] == 1
     assert fixed["metadata"]["lineage_serial"] == "001"
 
     assert conjugate["external_agent_id"].startswith("agent:")
-    assert conjugate["agent_name"] == "001影刃-初纪"
+    assert conjugate["agent_name"] == "001影刃"
     assert conjugate["client_url"] == "ws://provider.test:8082"
     assert conjugate["metadata"]["mode"] == "conjugate"
     assert conjugate["metadata"]["is_latest"] is True
-    assert conjugate["metadata"]["base_agent_name"] == "影刃-初纪"
-    assert conjugate["metadata"]["display_name"] == "001影刃-初纪"
+    assert conjugate["metadata"]["base_agent_name"] == "影刃"
+    assert conjugate["metadata"]["display_name"] == "001影刃"
     assert conjugate["metadata"]["lineage_index"] == 1
     assert conjugate["metadata"]["lineage_serial"] == "001"
     assert conjugate["metadata"]["skill_versions"] == {
@@ -453,6 +582,78 @@ def test_process_init_persists_versions_and_strategy_names(monkeypatch):
     assert state["strategies_used"] == ["wolf-logic", "common-logic"]
 
 
+def test_config_loads_confirmation_check_interval(monkeypatch, tmp_path):
+    from evolution.config import load_config
+
+    home = tmp_path / "agent-home"
+    home.mkdir()
+    (home / "config.yaml").write_text(
+        "\n".join([
+            "debounced_policy:",
+            "  confirmation:",
+            "    check_interval_seconds: 30",
+        ]),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("WEREWOLF_AGENT_HOME", str(home))
+
+    cfg = load_config()
+
+    assert cfg.confirmation.check_interval_seconds == 30
+
+
+def test_global_evolution_pass_confirms_after_clustering(monkeypatch):
+    from evolution.config import EvolutionConfig
+
+    calls = []
+
+    class FakePool:
+        def __init__(self, cfg):
+            self.cfg = cfg
+
+        def get_status(self):
+            return {
+                "pending_count": 0,
+                "cluster_count": 1,
+            }
+
+        def expire_old_suggestions(self):
+            calls.append("expire")
+            return 0
+
+    class FakeClusterer:
+        def __init__(self, cfg, pool):
+            self.cfg = cfg
+            self.pool = pool
+
+        def process_pending(self):
+            calls.append("cluster")
+            return ["cluster-1"]
+
+    class FakeJudge:
+        def __init__(self, cfg, pool, vm):
+            self.cfg = cfg
+            self.pool = pool
+            self.vm = vm
+
+        def check_all_clusters(self):
+            calls.append("confirm")
+            return ["cluster-1"]
+
+    class FakeVersionManager:
+        def __init__(self, cfg):
+            self.cfg = cfg
+
+    monkeypatch.setattr("evolution.buffer_pool.BufferPool", FakePool)
+    monkeypatch.setattr("evolution.clustering.SuggestionClusterer", FakeClusterer)
+    monkeypatch.setattr("evolution.confirmation.ConfirmationJudge", FakeJudge)
+    monkeypatch.setattr("evolution.version_manager.VersionManager", FakeVersionManager)
+
+    _run_global_evolution_pass(EvolutionConfig())
+
+    assert calls == ["cluster", "confirm"]
+
+
 def test_save_game_archives_versions_used():
     save_game(
         game_id="game-1",
@@ -524,10 +725,10 @@ def test_list_provider_agents_exposes_latest_evolution_fixed_id():
 
     fixed = agents[0]
     assert fixed["external_agent_id"] == "latest:evolution"
-    assert fixed["agent_name"] == "001影刃-初纪"
+    assert fixed["agent_name"] == "001影刃"
     assert fixed["metadata"]["mode"] == "latest-evolution"
     assert fixed["metadata"]["is_latest"] is True
-    assert fixed["metadata"]["base_agent_name"] == "影刃-初纪"
+    assert fixed["metadata"]["base_agent_name"] == "影刃"
     assert fixed["metadata"]["lineage_index"] == 1
     assert fixed["metadata"]["lineage_serial"] == "001"
     assert fixed["client_type"] == "ws"

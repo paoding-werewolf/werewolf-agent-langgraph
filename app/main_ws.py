@@ -541,9 +541,10 @@ async def _debounced_global_pass(cfg) -> None:
 
 
 def _run_global_evolution_pass(cfg) -> None:
-    """池级聚类，每局只跑一次（线程内执行，不阻塞事件循环）。
+    """池级聚类和确认，每局只跑一次（线程内执行，不阻塞事件循环）。
 
-    确认和过期清理已移至独立定时任务 _confirmation_expire_loop，不再绑定游戏结束。
+    聚类后立即确认一次，避免有效 cluster 等待定时任务才生成版本。
+    过期清理仍由独立定时任务 _confirmation_expire_loop 兜底。
     Curator 有自己的 _curator_monitor_loop。
     """
     from evolution.buffer_pool import BufferPool
@@ -552,45 +553,50 @@ def _run_global_evolution_pass(cfg) -> None:
     pool = BufferPool(cfg)
     clusterer = SuggestionClusterer(cfg, pool)
     clusterer.process_pending()
-    logger.info("Global evolution pass (clustering only) complete")
+    confirmed, _expired = _run_confirmation_and_expire(cfg, expire=False)
+    logger.info("Global evolution pass complete: confirmed=%s", confirmed)
 
 
-_CONFIRMATION_EXPIRE_INTERVAL_S = 3600  # 1 hour
+def _run_confirmation_and_expire(cfg, expire: bool = True) -> tuple[int, int]:
+    """执行一次 cluster 确认，可选清理过期建议。"""
+    from evolution.buffer_pool import BufferPool
+    from evolution.confirmation import ConfirmationJudge
+    from evolution.version_manager import VersionManager
+
+    pool = BufferPool(cfg)
+    status = pool.get_status()
+    has_clusters = status["cluster_count"] > 0
+    has_expirable_items = status["pending_count"] > 0 or status["cluster_count"] > 0
+    if not has_clusters and (not expire or not has_expirable_items):
+        return 0, 0
+
+    confirmed = []
+    if has_clusters:
+        vm = VersionManager(cfg)
+        judge = ConfirmationJudge(cfg, pool, vm)
+        confirmed = judge.check_all_clusters()
+
+    expired = pool.expire_old_suggestions() if expire and has_expirable_items else 0
+    return len(confirmed), expired
+
+
+_CONFIRMATION_EXPIRE_INTERVAL_S = 600
 
 
 async def _confirmation_expire_loop(interval: float):
-    """每小时检查一次：确认满足条件的 cluster + 清理过期建议。
-
-    与手动确认共享 _global_pass_lock，防止并发确认同一个 cluster。
-    使用 asyncio.to_thread 避免同步 LLM/DB 操作阻塞事件循环。
-    """
+    """定时检查：确认满足条件的 cluster + 清理过期建议。"""
     while True:
         await asyncio.sleep(interval)
         try:
             from evolution.config import load_config
-            from evolution.buffer_pool import BufferPool
-            from evolution.confirmation import ConfirmationJudge
-            from evolution.version_manager import VersionManager
-
-            def _do():
-                cfg = load_config()
-                if not cfg.enabled:
-                    return
-                pool = BufferPool(cfg)
-                status = pool.get_status()
-                if status["cluster_count"] == 0 and status["expired_count"] == 0:
-                    return
-                vm = VersionManager(cfg)
-                judge = ConfirmationJudge(cfg, pool, vm)
-                confirmed = judge.check_all_clusters()
-                if confirmed:
-                    logger.info(f"Confirmation expire loop: {len(confirmed)} clusters confirmed")
-                expired = pool.expire_old_suggestions()
-                if expired:
-                    logger.info(f"Confirmation expire loop: {expired} suggestions expired")
-
-            async with _global_pass_lock:
-                await asyncio.to_thread(_do)
+            cfg = load_config()
+            if not cfg.enabled:
+                continue
+            confirmed, expired = _run_confirmation_and_expire(cfg, expire=True)
+            if confirmed:
+                logger.info(f"Confirmation expire loop: {confirmed} clusters confirmed")
+            if expired:
+                logger.info(f"Confirmation expire loop: {expired} suggestions expired")
         except Exception:
             logger.exception("Confirmation/expire loop check failed")
 
@@ -1213,7 +1219,7 @@ async def _evo_buffer(request):
 
 
 async def _evo_cluster_pending(request):
-    """手动触发：将 pending 建议聚类。与自动聚类共享锁，防止并发冲突。"""
+    """手动触发：将 pending 建议聚类。"""
     try:
         from evolution.config import load_config
         from evolution.buffer_pool import BufferPool
@@ -1226,19 +1232,14 @@ async def _evo_cluster_pending(request):
             clustered = clusterer.process_pending()
             return {"clustered": len(clustered)}
 
-        async with _global_pass_lock:
-            result = await asyncio.to_thread(_do)
+        result = await asyncio.to_thread(_do)
         return aiohttp_web.json_response(result)
     except Exception as e:
         return aiohttp_web.json_response({"detail": str(e)}, status=500)
 
 
 async def _evo_confirm_clusters(request):
-    """手动触发：确认满足条件的 cluster 为新版本。
-
-    与自动确认循环共享锁，防止并发跑重复确认同一个 cluster。
-    await 等待完成而非 fire-and-forget，确保调用方拿到真实结果。
-    """
+    """手动触发：确认满足条件的 cluster 为新版本（异步，立即返回）。"""
     try:
         from evolution.config import load_config
         from evolution.buffer_pool import BufferPool
@@ -1251,16 +1252,12 @@ async def _evo_confirm_clusters(request):
             vm = VersionManager(cfg)
             judge = ConfirmationJudge(cfg, pool, vm)
             confirmed = judge.check_all_clusters()
-            return {
-                "status": "completed",
-                "confirmed": len(confirmed),
-            }
+            logger.info(f"Background confirmation done: {len(confirmed)} clusters confirmed")
 
-        async with _global_pass_lock:
-            result = await asyncio.to_thread(_do)
-        return aiohttp_web.json_response(result)
+        asyncio.create_task(asyncio.to_thread(_do))
+        return aiohttp_web.json_response({"status": "started"})
     except Exception as e:
-        return aiohttp_web.json_response({"status": "error", "detail": str(e)}, status=500)
+        return aiohttp_web.json_response({"detail": str(e)}, status=500)
 
 
 async def _evo_cluster_detail(request):
@@ -1547,6 +1544,7 @@ async def _evo_curator_status(request):
                 "normal_min_avg_causal_strength": cfg.confirmation.normal_min_avg_causal_strength,
                 "fast_track_min_causal_strength": cfg.confirmation.fast_track_min_causal_strength,
                 "fast_track_min_count": cfg.confirmation.fast_track_min_count,
+                "check_interval_seconds": cfg.confirmation.check_interval_seconds,
             },
             "runtime": {
                 "last_run_at": last_run_at,
@@ -1752,7 +1750,14 @@ async def main(host: str = "0.0.0.0", port: int = 7861, http_port: int = 7860):
     cleanup_interval = min(max(store.ttl / 4, 60.0), 300.0)
     cleanup_task = asyncio.create_task(_cleanup_loop(cleanup_interval))
     curator_monitor_task = asyncio.create_task(_curator_monitor_loop(_CURATOR_MONITOR_INTERVAL_S))
-    confirmation_expire_task = asyncio.create_task(_confirmation_expire_loop(_CONFIRMATION_EXPIRE_INTERVAL_S))
+    confirmation_interval = _CONFIRMATION_EXPIRE_INTERVAL_S
+    try:
+        from evolution.config import load_config
+        confirmation_interval = int(load_config().confirmation.check_interval_seconds)
+    except Exception:
+        logger.exception("Failed to load confirmation interval; using default")
+    confirmation_interval = max(1, confirmation_interval)
+    confirmation_expire_task = asyncio.create_task(_confirmation_expire_loop(confirmation_interval))
 
     # ── HTTP 兼容服务 ──
     http_runner = None
@@ -1774,6 +1779,7 @@ async def main(host: str = "0.0.0.0", port: int = 7861, http_port: int = 7860):
         logger.info(f"WS Agent Service running on ws://{host}:{port}")
         logger.info(f"Debug endpoints: http://{host}:{port}/debug/view (and /debug/prompts)")
         logger.info(f"Session TTL: {store.ttl}s, cleanup every {cleanup_interval}s")
+        logger.info(f"Confirmation/expire check every {confirmation_interval}s")
         await stop
 
     # ── 清理 ──

@@ -22,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "app"))
 
 from evolution.conjugate_agent import (  # noqa: E402
+    agent_identity_needs_regeneration,
     build_existing_agent_identity_facts,
     fallback_agent_name,
     generate_agent_identity,
@@ -66,7 +67,11 @@ def parse_ids(raw: str) -> set[int] | None:
     return {int(part.strip()) for part in raw.split(",") if part.strip()}
 
 
-def build_plan(target_ids: set[int] | None, use_llm: bool) -> list[dict[str, Any]]:
+def build_plan(
+    target_ids: set[int] | None,
+    use_llm: bool,
+    fallback_only: bool,
+) -> list[dict[str, Any]]:
     session = get_session()
     try:
         agents = (
@@ -77,7 +82,8 @@ def build_plan(target_ids: set[int] | None, use_llm: bool) -> list[dict[str, Any
         selected = [
             agent
             for agent in agents
-            if target_ids is None or agent.id in target_ids
+            if (target_ids is None or agent.id in target_ids)
+            and (not fallback_only or agent_identity_needs_regeneration(agent))
         ]
         missing_ids = sorted((target_ids or set()) - {agent.id for agent in selected})
         if missing_ids:
@@ -225,6 +231,11 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--ids", default="", help="Comma-separated ids. Default: all agents.")
+    parser.add_argument(
+        "--fallback-only",
+        action="store_true",
+        help="Only regenerate agents with non-spec names or empty changelog/lore.",
+    )
     parser.add_argument("--no-llm", action="store_true", help="Use deterministic fallbacks only.")
     parser.add_argument("--refresh-avatar-seed", action="store_true")
     parser.add_argument("--sample", type=int, default=10)
@@ -245,7 +256,7 @@ def main() -> int:
     else:
         target_ids = parse_ids(args.ids)
         use_llm = not args.no_llm
-        plan = build_plan(target_ids, use_llm)
+        plan = build_plan(target_ids, use_llm, args.fallback_only)
 
         default_output = (
             ROOT / "backups" /

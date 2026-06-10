@@ -29,6 +29,7 @@ class ConfirmationConfig:
     normal_min_avg_causal_strength: float = 0.35
     fast_track_min_causal_strength: float = 0.70
     fast_track_min_count: int = 1
+    check_interval_seconds: int = 600
 
 
 @dataclass
@@ -95,8 +96,14 @@ def load_config() -> EvolutionConfig:
         _merge_dataclass(cfg.reflection, dp.get("reflection", {}))
         _merge_dataclass(cfg.buffer, dp.get("buffer", {}))
 
-        normal_cfg = dp.get("confirmation", {}).get("normal", {})
-        fast_cfg = dp.get("confirmation", {}).get("fast_track", {})
+        confirmation_cfg = dp.get("confirmation", {})
+        direct_confirmation_cfg = {
+            k: v for k, v in confirmation_cfg.items()
+            if k not in ("normal", "fast_track")
+        }
+        _merge_dataclass(cfg.confirmation, direct_confirmation_cfg)
+        normal_cfg = confirmation_cfg.get("normal", {})
+        fast_cfg = confirmation_cfg.get("fast_track", {})
         _merge_dataclass(cfg.confirmation, normal_cfg, prefix="normal_")
         _merge_dataclass(cfg.confirmation, fast_cfg, prefix="fast_track_")
 

@@ -82,7 +82,7 @@ class PromptBuilder:
             prompt += "\n---\n" + extra_data["self_model_text"]
 
         # ── Evolved strategy injection ──
-        if include_thinking_framework:
+        if include_thinking_framework and not self.agent_role.is_wolf_team:
             strategy_text = ""
             if extra_data and extra_data.get("evolution_strategies"):
                 strategy_text = extra_data["evolution_strategies"]

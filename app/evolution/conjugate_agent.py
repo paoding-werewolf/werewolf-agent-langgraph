@@ -9,6 +9,9 @@ import difflib
 import hashlib
 import json
 import logging
+import os
+import re
+import time
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
@@ -20,7 +23,7 @@ from evolution.models import ConjugateAgent, EvolutionSkill, EvolutionSkillVersi
 logger = logging.getLogger("evolution.conjugate_agent")
 
 
-_NAME_PREFIXES = [
+_FALLBACK_NAME_ROOTS = [
     "影刃",
     "霜牙",
     "烬瞳",
@@ -30,9 +33,18 @@ _NAME_PREFIXES = [
     "雾裁",
     "星狩",
     "赤冕",
-    "寒鸦",
+    "幽衡",
+    "澄镜",
+    "断弦",
+    "素问",
+    "青垣",
+    "黯烛",
+    "孤衡",
 ]
-_EPOCH_NAMES = ["初纪", "二纪", "三纪", "四纪", "五纪", "六纪", "七纪", "八纪", "九纪", "十纪"]
+_FALLBACK_NAME_MODIFIERS = ["玄", "霜", "烬", "夜", "银", "雾", "星", "赤", "幽", "澄", "青", "黯"]
+_AGENT_NAME_RE = re.compile(r"^[\u4e00-\u9fff]{2,3}$")
+_IDENTITY_RETRY_INITIAL_SECONDS = 1.0
+_IDENTITY_RETRY_MAX_SECONDS = 300.0
 
 
 def _utc_now() -> datetime:
@@ -229,12 +241,45 @@ def _agent_identity_complete(agent: ConjugateAgent) -> bool:
     return True
 
 
+def agent_identity_needs_regeneration(agent: ConjugateAgent) -> bool:
+    """判断共轭体身份是否需要重新生成。"""
+    if not _agent_name_in_spec(agent.agent_name or ""):
+        return True
+    if not (agent.changelog or "").strip():
+        return True
+    if not (agent.lore or "").strip():
+        return True
+    return False
+
+
 def fallback_agent_name(previous: ConjugateAgent | None) -> str:
-    next_index = 1 if previous is None else previous.id + 1
-    prefix = _NAME_PREFIXES[(next_index - 1) % len(_NAME_PREFIXES)]
-    epoch = _EPOCH_NAMES[(next_index - 1) % len(_EPOCH_NAMES)]
-    cycle = (next_index - 1) // len(_EPOCH_NAMES)
-    return f"{prefix}-{epoch}" if cycle == 0 else f"{prefix}-{epoch}-{cycle + 1}"
+    """生成符合身份规范的确定性兜底名：2-3 个中文字符，不带纪元/编号。"""
+    next_index = _next_agent_index(previous)
+    return _deterministic_agent_name(next_index)
+
+
+def _next_agent_index(previous: ConjugateAgent | None) -> int:
+    if previous is None:
+        return 1
+    try:
+        previous_id = int(getattr(previous, "id", 0) or 0)
+        return previous_id + 1 if previous_id > 0 else 1
+    except (TypeError, ValueError):
+        return 1
+
+
+def _deterministic_agent_name(index: int) -> str:
+    if index <= len(_FALLBACK_NAME_ROOTS):
+        return _FALLBACK_NAME_ROOTS[index - 1]
+
+    offset = index - len(_FALLBACK_NAME_ROOTS) - 1
+    root = _FALLBACK_NAME_ROOTS[offset % len(_FALLBACK_NAME_ROOTS)]
+    modifier = _FALLBACK_NAME_MODIFIERS[(offset // len(_FALLBACK_NAME_ROOTS)) % len(_FALLBACK_NAME_MODIFIERS)]
+    if root.startswith(modifier):
+        modifier = _FALLBACK_NAME_MODIFIERS[
+            ((offset // len(_FALLBACK_NAME_ROOTS)) + 1) % len(_FALLBACK_NAME_MODIFIERS)
+        ]
+    return f"{modifier}{root}"
 
 
 def generate_avatar_seed(fingerprint: str) -> str:
@@ -312,9 +357,51 @@ def build_existing_agent_identity_facts(
                 f"Fingerprint: {agent.fingerprint[:16]}",
             ],
             "raw_diff": "",
-            "fallback_agent_name": agent.agent_name or fallback_agent_name(previous_agent),
+            "fallback_agent_name": _fallback_existing_agent_name(agent, previous_agent),
             "fallback_changelog": agent.changelog or "Genesis: initial skill library snapshot",
-            "fallback_lore": _fallback_existing_lore(agent, roles),
+            "fallback_lore": initial_fallback_lore(
+                _fallback_existing_agent_name(agent, previous_agent),
+                len(snapshot),
+                roles,
+            ),
+        }
+
+    rewrite_summary = _summarize_snapshot_rewrite(changed)
+    if rewrite_summary:
+        agent_name = _fallback_existing_agent_name(agent, previous_agent)
+        return {
+            "event_type": "identity_backfill_snapshot_rewrite",
+            "previous_agent_name": previous_agent.agent_name if previous_agent else "无",
+            "previous_born_at": previous_agent.born_at.isoformat() if previous_agent and previous_agent.born_at else "",
+            "previous_lore": previous_agent.lore if previous_agent else "",
+            "existing_agent_names": [
+                name for name in _existing_agent_names(session)
+                if name != agent.agent_name
+            ],
+            "trigger_skill_name": "全局策略快照重整",
+            "trigger_skill_role": ", ".join(roles) if roles else "unknown",
+            "previous_version": "旧策略键集合",
+            "new_version": "新策略键集合",
+            "born_at": agent.born_at.isoformat() if agent.born_at else _utc_now().isoformat(),
+            "skill_versions_json": snapshot,
+            "diff_summary": rewrite_summary,
+            "raw_diff": "",
+            "fallback_agent_name": agent_name,
+            "fallback_changelog": fallback_changelog(
+                previous_agent,
+                "全局策略快照重整",
+                "旧策略键集合",
+                "新策略键集合",
+                rewrite_summary,
+            ),
+            "fallback_lore": fallback_lore(
+                agent_name,
+                previous_agent,
+                "全局策略快照重整",
+                "旧策略键集合",
+                "新策略键集合",
+                rewrite_summary,
+            ),
         }
 
     trigger_skill_name, previous_version, new_version = changed[0]
@@ -332,9 +419,16 @@ def build_existing_agent_identity_facts(
         name for name in facts.get("existing_agent_names", [])
         if name != agent.agent_name
     ]
-    facts["fallback_agent_name"] = agent.agent_name or facts["fallback_agent_name"]
+    facts["fallback_agent_name"] = _fallback_existing_agent_name(agent, previous_agent)
     facts["fallback_changelog"] = agent.changelog or facts["fallback_changelog"]
-    facts["fallback_lore"] = _fallback_existing_lore(agent, roles)
+    facts["fallback_lore"] = fallback_lore(
+        facts["fallback_agent_name"],
+        previous_agent,
+        trigger_skill_name,
+        previous_version,
+        new_version,
+        facts.get("diff_summary") or [],
+    )
     if len(changed) > 1:
         facts["diff_summary"] = list(facts.get("diff_summary") or []) + [
             f"Also changed: {skill_name} {old_version}->{new_version}"
@@ -356,13 +450,25 @@ def _changed_skill_versions(
     return changed
 
 
-def _fallback_existing_lore(agent: ConjugateAgent, roles: list[str]) -> str:
-    name = agent.agent_name or "未命名共轭体"
-    return (
-        f"{name} 是一枚已封存的共轭快照，覆盖"
-        f" {', '.join(roles) if roles else 'unknown'} 角色策略。"
-        "它的指纹记录了某一刻的全局默认 skill 组合，可作为后来进化体的冷冻基线。"
-    )
+def _summarize_snapshot_rewrite(changed: list[tuple[str, str, str]]) -> list[str] | None:
+    removed = [name for name, old, new in changed if old != "none" and new == "none"]
+    added = [name for name, old, new in changed if old == "none" and new != "none"]
+    if len(removed) < 5 or len(added) < 5:
+        return None
+    return [
+        f"全局策略快照重整：移除 {len(removed)} 个旧策略键，接入 {len(added)} 个新策略键",
+        "策略命名和版本集合发生批量迁移，后续身份应以新快照为准",
+    ]
+
+
+def _fallback_existing_agent_name(
+    agent: ConjugateAgent,
+    previous_agent: ConjugateAgent | None,
+) -> str:
+    current_name = str(agent.agent_name or "").strip()
+    if _agent_name_in_spec(current_name):
+        return current_name
+    return fallback_agent_name(previous_agent)
 
 
 def build_evolution_facts(
@@ -387,6 +493,14 @@ def build_evolution_facts(
             lineterm="",
         )
     )
+    fallback_name = fallback_agent_name(previous_agent)
+    changelog = fallback_changelog(
+        previous_agent,
+        trigger_skill_name,
+        previous_version,
+        new_version,
+        diff_summary,
+    )
     return {
         "previous_agent_name": previous_agent.agent_name if previous_agent else "无",
         "previous_born_at": previous_agent.born_at.isoformat() if previous_agent and previous_agent.born_at else "",
@@ -400,8 +514,10 @@ def build_evolution_facts(
         "skill_versions_json": snapshot,
         "diff_summary": diff_summary,
         "raw_diff": _truncate(raw_diff, 4000),
-        "fallback_agent_name": fallback_agent_name(previous_agent),
-        "fallback_changelog": fallback_changelog(
+        "fallback_agent_name": fallback_name,
+        "fallback_changelog": changelog,
+        "fallback_lore": fallback_lore(
+            fallback_name,
             previous_agent,
             trigger_skill_name,
             previous_version,
@@ -412,20 +528,36 @@ def build_evolution_facts(
 
 
 def generate_agent_identity(facts: dict[str, Any]) -> dict[str, str]:
-    try:
-        identity = _generate_agent_identity_with_llm(facts)
-        return _normalize_identity(identity, facts)
-    except Exception:
-        logger.exception("Failed to generate conjugate agent identity with LLM, using fallback")
-        return _fallback_identity(facts)
+    delay = _identity_retry_initial_seconds()
+    max_delay = _identity_retry_max_seconds()
+    attempt = 1
+    while True:
+        try:
+            identity = _generate_agent_identity_with_llm(facts)
+            return _normalize_identity(identity, facts, allow_fallback=False)
+        except Exception as exc:
+            logger.warning(
+                "Failed to generate valid conjugate agent identity with LLM; "
+                "retrying in %.1fs (attempt=%s, error=%s)",
+                delay,
+                attempt,
+                exc,
+                exc_info=True,
+            )
+            time.sleep(delay)
+            delay = min(delay * 2, max_delay)
+            attempt += 1
 
 
 def _generate_agent_identity_with_llm(facts: dict[str, Any]) -> dict[str, Any]:
     from agents.llm_caller import llm
+    from evolution.config import load_config
 
     prompt = build_agent_identity_prompt(facts)
+    model = llm.model or load_config().clustering_model
+    llm.model = model
     resp = llm.client.chat.completions.create(
-        model=llm.model,
+        model=model,
         messages=[
             {
                 "role": "system",
@@ -515,18 +647,29 @@ def _strip_json_fence(content: str) -> str:
     return text
 
 
-def _normalize_identity(identity: dict[str, Any], facts: dict[str, Any]) -> dict[str, str]:
+def _normalize_identity(
+    identity: dict[str, Any],
+    facts: dict[str, Any],
+    *,
+    allow_fallback: bool = True,
+) -> dict[str, str]:
     fallback = _fallback_identity(facts)
     existing_names = set(facts.get("existing_agent_names") or [])
     agent_name = str(identity.get("agent_name") or "").strip()
     changelog = str(identity.get("changelog") or "").strip()
     lore = str(identity.get("lore") or "").strip()
 
-    if not agent_name or agent_name in existing_names or len(agent_name) > 12:
+    if not agent_name or agent_name in existing_names or not _agent_name_in_spec(agent_name):
+        if not allow_fallback:
+            raise ValueError(f"LLM identity agent_name is invalid or duplicated: {agent_name!r}")
         agent_name = fallback["agent_name"]
     if not changelog:
+        if not allow_fallback:
+            raise ValueError("LLM identity changelog is empty")
         changelog = fallback["changelog"]
     if not lore:
+        if not allow_fallback:
+            raise ValueError("LLM identity lore is empty")
         lore = fallback["lore"]
 
     return {
@@ -538,10 +681,33 @@ def _normalize_identity(identity: dict[str, Any], facts: dict[str, Any]) -> dict
 
 def _fallback_identity(facts: dict[str, Any]) -> dict[str, str]:
     return {
-        "agent_name": str(facts.get("fallback_agent_name") or "影刃-初纪"),
+        "agent_name": str(facts.get("fallback_agent_name") or "影刃"),
         "changelog": str(facts.get("fallback_changelog") or "策略默认版本发生晋升。"),
         "lore": str(facts.get("fallback_lore") or ""),
     }
+
+
+def _agent_name_in_spec(name: str) -> bool:
+    return bool(_AGENT_NAME_RE.fullmatch(str(name or "").strip()))
+
+
+def _identity_retry_initial_seconds() -> float:
+    return _positive_float_env("CONJUGATE_IDENTITY_RETRY_INITIAL_SECONDS", _IDENTITY_RETRY_INITIAL_SECONDS)
+
+
+def _identity_retry_max_seconds() -> float:
+    return _positive_float_env("CONJUGATE_IDENTITY_RETRY_MAX_SECONDS", _IDENTITY_RETRY_MAX_SECONDS)
+
+
+def _positive_float_env(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
 
 
 def fallback_changelog(
@@ -551,15 +717,64 @@ def fallback_changelog(
     new_version: str,
     diff_summary: list[str],
 ) -> str:
-    previous_id = previous_agent.id if previous_agent else 0
+    from_text = _format_version_label(previous_version)
+    to_text = _format_version_label(new_version)
     lines = [
-        f"Agent #{previous_id + 1} 自然语言变更记录：{trigger_skill_name} 从 {previous_version} 晋升到 {new_version}。",
+        f"共轭体默认策略变更：{trigger_skill_name} 从 {from_text} 调整到 {to_text}。",
     ]
     if diff_summary:
-        lines.append("核心变化包括：" + "；".join(diff_summary[:3]) + "。")
+        lines.append("核心变化包括：" + "；".join(_clean_diff_focus(item) for item in diff_summary[:3]) + "。")
     else:
         lines.append("策略文本发生更新，但没有检测到可独立摘录的段落级变化。")
     return "\n".join(lines)
+
+
+def initial_fallback_lore(agent_name: str, snapshot_count: int, roles: list[str]) -> str:
+    return (
+        f"{agent_name} 是共轭谱系的初代形态，携带 {snapshot_count} 个策略快照"
+        f"与 {', '.join(roles) if roles else 'unknown'} 角色覆盖。"
+        "它还没有前代记忆，却已经把夜战、推理与伪装的基础本能封存在同一枚指纹中。"
+    )
+
+
+def fallback_lore(
+    agent_name: str,
+    previous_agent: ConjugateAgent | None,
+    trigger_skill_name: str,
+    previous_version: str,
+    new_version: str,
+    diff_summary: list[str],
+) -> str:
+    previous_name = previous_agent.agent_name if previous_agent and previous_agent.agent_name else "前代共轭体"
+    focus = _clean_diff_focus(diff_summary[0]) if diff_summary else "策略文本的关键变化"
+    from_text = _format_version_label(previous_version)
+    to_text = _format_version_label(new_version)
+    return (
+        f"{agent_name} 承接 {previous_name} 的判断习惯，在 {trigger_skill_name} "
+        f"由 {from_text} 调整为 {to_text} 后成形。"
+        f"它更关注 {focus}，因此在发言、站边和身份管理上会保留这次变化的痕迹。"
+        "这不是换一张脸，而是一次有来源的性格偏移。"
+    )
+
+
+def _clean_diff_focus(text: str) -> str:
+    focus = str(text or "").strip()
+    for prefix in ("Added: ", "Removed: ", "Modified: "):
+        if focus.startswith(prefix):
+            focus = focus[len(prefix):]
+            break
+    focus = focus.strip().strip('"')
+    for prefix in ("description: ", "role: ", "version: ", "tags: "):
+        if focus.startswith(prefix):
+            focus = focus[len(prefix):]
+            break
+    return _truncate(focus, 96) if focus else "策略文本的关键变化"
+
+
+def _format_version_label(version: str) -> str:
+    if version == "none":
+        return "未启用"
+    return version
 
 
 def _load_version_content(session, skill: EvolutionSkill | None, version: str) -> str:
