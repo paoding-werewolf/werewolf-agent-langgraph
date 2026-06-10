@@ -270,9 +270,11 @@ class EvolutionSummary:
             new_versions = []
             for v in rows:
                 skill = session.query(EvolutionSkill).filter_by(id=v.skill_id).first()
+                role = skill.role if skill else "unknown"
                 new_versions.append({
                     "skill_name": skill.skill_name if skill else str(v.skill_id),
-                    "role": skill.role if skill else "未知",
+                    "role": role,
+                    "role_label": ROLE_LABELS.get(role, role),
                     "version": v.version,
                     "win_rate": float(v.win_rate or 0),
                     "games_played": v.games_played,
@@ -489,7 +491,7 @@ class EvolutionSummary:
         generations = data.get("generations", [])
         state = data.get("state", {})
 
-        if not new_versions and not state:
+        if not new_versions and not generations and not state.get("status"):
             return "（本周期内无 GEPA 离线进化活动）"
 
         lines = []
@@ -498,16 +500,19 @@ class EvolutionSummary:
         status = state.get("status", "idle")
         total_gens = state.get("total_generations", 0)
         current_gen = state.get("current_generation", 0)
+        population_size = state.get("population_size", 0)
         if status == "running":
-            lines.append(f"GEPA 正在运行中（第 {current_gen}/{total_gens} 代）")
-        elif status in ("completed", "cancelled"):
+            lines.append(f"GEPA 正在运行中（第 {current_gen}/{total_gens} 代，种群大小 {population_size}）")
+        elif status == "completed":
             completed_at = state.get("completed_at", "")
-            lines.append(f"GEPA 已{('完成' if status == 'completed' else '取消')}，共完成 {len(generations)} 代" + (f"，完成时间 {completed_at[:19]}" if completed_at else ""))
+            lines.append(f"GEPA 已完成 {len(generations)} 代进化" + (f"，完成时间 {completed_at[:19]}" if completed_at else ""))
+        elif status == "cancelled":
+            lines.append(f"GEPA 已取消（共完成 {len(generations)} 代）")
 
-        # 代际详情
+        # 代际详情 — 用角色中文名，提供更多故事素材
         if generations:
             lines.append("")
-            lines.append("各代进化详情：")
+            lines.append("各代进化详情（注意用中文角色名讲故事）：")
             for g in generations:
                 gen_num = g.get("generation", "?")
                 mut = g.get("mutations", 0)
@@ -516,44 +521,56 @@ class EvolutionSummary:
                 pareto = g.get("pareto_front", [])
                 fitness = g.get("best_fitness", {})
 
-                # 解析策略角色
+                # 从新版本名解析 skill_name → 在 new_versions 汇总中匹配角色标签
+                def resolve_role(skill_name: str) -> str:
+                    for nv in new_versions:
+                        if nv.get("skill_name") == skill_name:
+                            return nv.get("role_label", nv.get("role", "未知"))
+                    # 尝试模糊匹配
+                    for nv in new_versions:
+                        sn = nv.get("skill_name", "")
+                        if sn and (sn in skill_name or skill_name in sn):
+                            return nv.get("role_label", nv.get("role", "未知"))
+                    return "未知"
+
+                # 按角色分组新版本
                 skills_by_role: Dict[str, list] = {}
                 for v_name in new_vers:
-                    # 版本名格式: skill-name:version
                     skill_name = v_name.rsplit(":", 1)[0] if ":" in v_name else v_name
-                    role = "未知"
-                    for nv in new_versions:
-                        if nv["skill_name"] == skill_name:
-                            role = nv["role"]
-                            break
-                    if role not in skills_by_role:
-                        skills_by_role[role] = []
-                    skills_by_role[role].append(v_name)
+                    role_label = resolve_role(skill_name)
+                    if role_label not in skills_by_role:
+                        skills_by_role[role_label] = []
+                    skills_by_role[role_label].append(v_name)
 
-                # 同理解析 Pareto 前沿
+                # Pareto 前沿解析
                 pareto_skills = []
                 for p in pareto:
                     skill_name = p.rsplit(":", 1)[0] if ":" in p else p
-                    pareto_skills.append(skill_name)
+                    role_label = resolve_role(skill_name)
+                    pareto_skills.append(f"{role_label}{skill_name}")
 
-                parts = [f"第 {gen_num} 代："]
                 ops = []
                 if mut:
                     ops.append(f"{mut} 次变异")
                 if cross:
                     ops.append(f"{cross} 次交叉")
+
+                parts = [f"第 {gen_num} 代："]
                 if ops:
-                    parts.append(f"执行了 {'、'.join(ops)}；")
+                    parts.append(f"执行了 {'、'.join(ops)}，")
+                else:
+                    parts.append("初始评估，")
 
                 if skills_by_role:
                     role_parts = []
-                    for role, vers in skills_by_role.items():
-                        role_parts.append(f"{role}角色策略「{vers[0].rsplit(':', 1)[0] if ':' in vers[0] else vers[0]}」产生 {len(vers)} 个新版本")
+                    for role_label, vers in skills_by_role.items():
+                        skill_short = vers[0].rsplit(":", 1)[0] if ":" in vers[0] else vers[0]
+                        role_parts.append(f"{role_label}的「{skill_short}」产生 {len(vers)} 个新版本")
                     parts.append("、".join(role_parts) + "；")
 
                 if pareto_skills:
                     unique_skills = list(dict.fromkeys(pareto_skills))
-                    parts.append(f"Pareto 前沿 {len(pareto)} 个策略（{', '.join(unique_skills[:5])}）")
+                    parts.append(f"Pareto 前沿包含 {len(pareto)} 个策略（{', '.join(unique_skills[:5])}）")
 
                 if fitness:
                     wr = fitness.get("win_rate")
@@ -562,19 +579,20 @@ class EvolutionSummary:
 
                 lines.append("".join(parts))
 
-        # 新版本汇总
+        # 新版本汇总 — 按角色中文名分组
         if new_versions:
             lines.append("")
-            lines.append("GEPA 产出的新版本：")
+            lines.append("GEPA 产出的所有新版本汇总：")
             by_role: Dict[str, list] = {}
             for v in new_versions:
-                r = v.get("role", "未知")
+                r = v.get("role_label", v.get("role", "未知"))
                 if r not in by_role:
                     by_role[r] = []
                 by_role[r].append(v)
-            for role, vers in by_role.items():
-                names = [f"{v['version']}（胜率 {v['win_rate']:.0%}）" for v in vers]
-                lines.append(f"  - {role}：{', '.join(names)}")
+            for role_label, vers in by_role.items():
+                # 列出每个版本名、胜率、对局数，帮助 LLM 讲出具体故事
+                names = [f"{v['version']}（胜率{v['win_rate']:.0%}，{v.get('games_played',0)}局）" for v in vers]
+                lines.append(f"  - {role_label}：{', '.join(names)}")
 
         return "\n".join(lines)
 
