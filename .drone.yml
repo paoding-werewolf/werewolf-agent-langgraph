@@ -11,6 +11,15 @@ steps:
 
   - name: deploy
     image: docker:27
+    environment:
+      DATABASE_URL:
+        from_secret: database_url
+      OPENAI_API_KEY:
+        from_secret: openai_api_key
+      OPENAI_BASE_URL:
+        from_secret: openai_base_url
+      OPENAI_MODEL:
+        from_secret: openai_model
     volumes:
       - name: docker-sock
         path: /var/run/docker.sock
@@ -20,6 +29,13 @@ steps:
       - apk add --no-cache git
       - cd /deploy
       - git pull origin main
+      - |
+        cat > .env <<EOF
+        DATABASE_URL=$DATABASE_URL
+        OPENAI_API_KEY=$OPENAI_API_KEY
+        OPENAI_BASE_URL=$OPENAI_BASE_URL
+        OPENAI_MODEL=$OPENAI_MODEL
+        EOF
       - docker compose -p werewolf-agent-langgraph down
       - docker rm -f werewolf-agent-langgraph 2>/dev/null || true
       - docker compose -p werewolf-agent-langgraph build werewolf-agent

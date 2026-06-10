@@ -106,8 +106,8 @@ TOOLS = [
 class LLMCaller:
     def __init__(self):
         self.api_key = os.getenv("OPENAI_API_KEY")
-        self.base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-        self.model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        self.base_url = os.getenv("OPENAI_BASE_URL")
+        self.model = os.getenv("OPENAI_MODEL")
         self.temperature = 0.7
         self._async_client: Optional[AsyncOpenAI] = None
         self._client: Optional[OpenAI] = None
@@ -117,21 +117,31 @@ class LLMCaller:
             raise RuntimeError("OPENAI_API_KEY is required for LLM calls")
         return self.api_key
 
+    def _require_model_config(self) -> tuple[str, str]:
+        if not self.base_url:
+            raise RuntimeError("OPENAI_BASE_URL is required for LLM calls")
+        if not self.model:
+            raise RuntimeError("OPENAI_MODEL is required for LLM calls")
+        return self.base_url, self.model
+
     @property
     def async_client(self) -> AsyncOpenAI:
         if self._async_client is None:
-            self._async_client = AsyncOpenAI(api_key=self._require_api_key(), base_url=self.base_url)
+            base_url, _ = self._require_model_config()
+            self._async_client = AsyncOpenAI(api_key=self._require_api_key(), base_url=base_url)
         return self._async_client
 
     @property
     def client(self) -> OpenAI:
         if self._client is None:
-            self._client = OpenAI(api_key=self._require_api_key(), base_url=self.base_url)
+            base_url, _ = self._require_model_config()
+            self._client = OpenAI(api_key=self._require_api_key(), base_url=base_url)
         return self._client
 
     async def _chat_with_tools(self, system_prompt: str, user_msg: str):
+        _, model = self._require_model_config()
         resp = await self.async_client.chat.completions.create(
-            model=self.model,
+            model=model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_msg},
@@ -235,8 +245,9 @@ class LLMCaller:
                             session_id: str = "", external_agent_id: str = "") -> str:
         """Async LLM call that logs the prompt and returns the content."""
         try:
+            _, model = self._require_model_config()
             resp = await self.async_client.chat.completions.create(
-                model=self.model,
+                model=model,
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_msg},
