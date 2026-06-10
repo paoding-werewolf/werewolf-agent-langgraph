@@ -28,7 +28,8 @@ steps:
     commands:
       - apk add --no-cache git
       - cd /deploy
-      - git pull origin main
+      - git fetch origin main
+      - git reset --hard origin/main
       - |
         cat > .env <<EOF
         DATABASE_URL=$DATABASE_URL
