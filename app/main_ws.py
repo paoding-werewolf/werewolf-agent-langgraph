@@ -706,6 +706,25 @@ async def _process_game_over(session_id: str, req_id: str,
         }
 
     state["room_id"] = room_id
+
+    # 立即写入对局归档（基本信息），不等 LLM 反思；pipeline 结束后 upsert 完整数据
+    try:
+        from memory.game_archive import save_game as _save_game_immediate
+        _save_game_immediate(
+            game_id=room_id or session_id,
+            my_role=state["my_role"],
+            result=result,
+            day_count=state.get("day", 1),
+            scene_tags={"result": result},
+            reflection_report="",
+            full_trace="",
+            strategies_used=state.get("strategies_used", []),
+            versions_used=state.get("versions_used", {}),
+        )
+        logger.info(f"Immediate game archive saved: room={room_id}, role={state['my_role']}, result={result}")
+    except Exception:
+        logger.exception(f"Failed to save immediate game archive for room={room_id}")
+
     asyncio.create_task(_run_post_game_pipeline(
         state, result, winner_role, all_roles, session_id, req_id, room_id
     ))
