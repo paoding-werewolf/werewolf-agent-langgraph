@@ -207,13 +207,21 @@ This is a thinking framework for the villager role during daytime discussion, fo
         if not recent_events:
             return "- 暂无公开事件"
 
+        # 这些事件的 content 包含私密信息（如狼队友编号），不应暴露在公开摘要中
+        PRIVATE_CONTENT_STATUSES = {"start_game"}
+
         lines = []
         for event in recent_events:
             content = str(event.get("content") or "").strip()
+            status = event.get("status", "")
+            if status in PRIVATE_CONTENT_STATUSES:
+                round_num = event.get("round", state.day)
+                label = self.PHASE_LABELS.get(status, status)
+                lines.append(f"- Day {round_num} {label}: 游戏已开始")
+                continue
             if not content:
                 continue
             round_num = event.get("round", state.day)
-            status = event.get("status", "")
             label = self.PHASE_LABELS.get(status, status)
             lines.append(f"- Day {round_num} {label}: {content}")
 
