@@ -116,7 +116,7 @@ suggestion:
   text: "<一句话策略建议>"
   confidence: <0-1，你自评这条建议有多可靠>
   direction: <create/modify/discard>
-  target_skill: "<目标策略名，如 seer-identity-timing>"
+  target_skill: "<目标策略的中文名，如 预言家身份跳明时机、狼人独狼骚扰战术>"
   match_level: <high/medium/low>
 
 causal_strength: <0-1，本局中该建议与结果之间的因果关联强度>
@@ -128,6 +128,7 @@ causal_strength: <0-1，本局中该建议与结果之间的因果关联强度>
    - causal_strength: 本局的输赢与你的策略选择有多大因果关系（客观）
 2. 如果这局输赢主要靠运气，causal_strength 应该低
 3. match_level = low 的建议不会进入策略更新管道，只标记为 strategy_gap
+4. target_skill 必须用中文命名，清晰描述策略内容，不要用英文或拼音
 4. 如果没什么值得修改的，direction 填 discard"""
 
 
