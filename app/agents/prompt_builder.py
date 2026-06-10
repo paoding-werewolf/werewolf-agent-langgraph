@@ -63,7 +63,8 @@ class PromptBuilder:
                               final_instruction: str,
                               last_thought: str = "",
                               extra_data: Optional[Dict[str, Any]] = None,
-                              include_thinking_framework: bool = True) -> str:
+                              include_thinking_framework: bool = True,
+                              include_flag_prompt: bool = True) -> str:
         """
         主提示词构建器，从模块化部分组装提示词。
         """
@@ -100,8 +101,9 @@ This is a thinking framework for the villager role during daytime discussion, fo
 ---"""
 
         # ── In-game flag prompt ──
-        from evolution.in_game_flagger import IN_GAME_FLAG_PROMPT
-        prompt += f"\n---\n{IN_GAME_FLAG_PROMPT}\n"
+        if include_flag_prompt:
+            from evolution.in_game_flagger import IN_GAME_FLAG_PROMPT
+            prompt += f"\n---\n{IN_GAME_FLAG_PROMPT}\n"
 
         if last_thought:
             prompt += f"\n### Your Previous Reflection\n{last_thought}\n"

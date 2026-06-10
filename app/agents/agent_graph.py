@@ -1,3 +1,4 @@
+import json
 import re
 from typing import Literal
 from core.enums import Role
@@ -61,25 +62,56 @@ def _build_prompt_extra_data(state: AgentState, strategy_mode: str = "details") 
     return extra_data
 
 
-def _extract_selected_strategies(reflection: str) -> list[str]:
-    """从反思文本末尾解析 [SELECTED_STRATEGIES: key1, key2]。"""
-    match = re.search(r"\[SELECTED_STRATEGIES:\s*(.*?)\]", reflection, re.IGNORECASE | re.DOTALL)
-    if not match:
-        return []
+def _parse_reflection_json(reflection: str) -> dict:
+    """Parse reflection JSON output, handling markdown code-block wrapping.
 
-    raw_items = re.split(r"[,，\n]+", match.group(1))
-    selected = []
-    seen = set()
-    for item in raw_items:
-        key = item.strip().strip("`'\" ")
-        if not key or key.lower() in {"none", "null", "无", "空"}:
-            continue
-        if key not in seen:
-            selected.append(key)
-            seen.add(key)
-        if len(selected) >= 3:
-            break
-    return selected
+    Returns {"thought": str, "flags": list[dict], "selected_strategies": list[str]}.
+    Falls back to regex extraction if JSON parsing fails.
+    """
+    thought = reflection
+    flags = []
+    selected_strategies = []
+
+    json_match = re.search(r"\{[\s\S]*\}", reflection)
+    if json_match:
+        try:
+            data = json.loads(json_match.group(0))
+            thought = data.get("thought", reflection)
+            flags = data.get("flags", [])
+            selected_strategies = data.get("selected_strategies", [])
+            if isinstance(selected_strategies, list):
+                selected_strategies = [s for s in selected_strategies if isinstance(s, str) and s.strip()]
+            return {
+                "thought": thought.strip() if isinstance(thought, str) else reflection,
+                "flags": flags if isinstance(flags, list) else [],
+                "selected_strategies": selected_strategies,
+            }
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    # Fallback: regex extraction for [SELECTED_STRATEGIES: ...]
+    sel_match = re.search(r"\[SELECTED_STRATEGIES:\s*(.*?)\]", reflection, re.IGNORECASE | re.DOTALL)
+    if sel_match:
+        raw_items = re.split(r"[,，\n]+", sel_match.group(1))
+        seen = set()
+        for item in raw_items:
+            key = item.strip().strip("`'\" ")
+            if key and key.lower() not in {"none", "null", "无", "空"} and key not in seen:
+                selected_strategies.append(key)
+                seen.add(key)
+            if len(selected_strategies) >= 3:
+                break
+
+    # Fallback: regex extraction for [FLAG] markers
+    from evolution.in_game_flagger import InGameFlagger
+    flagger = InGameFlagger()
+    flags = flagger.extract_flags(reflection)
+
+    return {
+        "thought": thought.strip() if thought else reflection,
+        "flags": flags,
+        "selected_strategies": selected_strategies,
+    }
 
 
 PRIVATE_NIGHT_ACTIONS = {
@@ -224,7 +256,7 @@ def _extract_sheriff_from_events(events, current_sheriff):
     return current_sheriff
 
 async def _reflect_node(state: AgentState) -> AgentState:
-    """AI 内部反思：分析游戏状态并形成思路。"""
+    """AI 内部反思：分析游戏状态并形成思路。JSON 结构化输出。"""
     builder = PromptBuilder(Role(state["my_role"]), state["me_id"])
 
     task_guidance = """
@@ -232,12 +264,20 @@ async def _reflect_node(state: AgentState) -> AgentState:
 1. 浏览当前公开信息与历史广播，找出逻辑矛盾。
 2. 谁是最可疑的狼人？谁是已确认的神职？
 3. 你目前的立场是什么？你是否被怀疑？你将如何辩护？
-4. 根据 Strategy Skill Index 选择当前最需要读取的策略 key。默认选择 0-1 条，明显相关时最多 3 条。
+4. 审视当前生效的进化策略：策略前提是否成立？推荐行动是否合理？局势是否出现了策略未覆盖的情况？
+5. 根据 Strategy Skill Index 选择当前最需要读取的策略 key。默认选择 0-1 条，明显相关时最多 3 条。
 """
     final_instr = (
-        "输出你的内心独白。请简洁且有逻辑。\n"
-        "最后单独输出一行：[SELECTED_STRATEGIES: key1, key2]；"
-        "如果没有需要读取的策略，输出：[SELECTED_STRATEGIES:]。"
+        "以 JSON 格式输出（不要包含 ```json 代码块标记）。\n"
+        "{\n"
+        '  "thought": "你的内心独白和分析推理",\n'
+        '  "flags": [\n'
+        '    {"strategy_key": "策略key", "reason": "矛盾原因"}\n'
+        "  ],\n"
+        '  "selected_strategies": ["key1", "key2"]\n'
+        "}\n"
+        "如果没有发现策略矛盾，flags 为空数组 []。"
+        "如果没有需要读取的策略，selected_strategies 为空数组 []。"
     )
 
     gs = _to_agent_game_state(state)
@@ -247,6 +287,7 @@ async def _reflect_node(state: AgentState) -> AgentState:
         final_instr,
         "",
         extra_data=_build_prompt_extra_data(state, strategy_mode="index"),
+        include_flag_prompt=False,
     )
 
     reflection = await llm.call_with_log(
@@ -258,18 +299,28 @@ async def _reflect_node(state: AgentState) -> AgentState:
         state.get("external_agent_id", ""),
     )
 
+    parsed = _parse_reflection_json(reflection)
+
     update = {
-        "last_thought": reflection,
-        "selected_strategies": _extract_selected_strategies(reflection),
+        "last_thought": parsed["thought"],
+        "selected_strategies": parsed["selected_strategies"],
     }
 
-    # Extract in-game flags from this round's thought
-    from evolution.in_game_flagger import InGameFlagger
-    flagger = InGameFlagger()
-    new_flags = flagger.extract_flags(reflection)
+    new_flags = parsed["flags"]
     if new_flags:
-        existing_flags = state.get("in_game_flags", [])
-        update["in_game_flags"] = existing_flags + new_flags
+        # Normalize flags to the format expected by downstream consumers
+        normalized = []
+        for f in new_flags:
+            if isinstance(f, dict):
+                normalized.append({
+                    "type": f.get("type", "strategy_mismatch"),
+                    "description": f.get("reason", f.get("description", str(f))),
+                    "detected_in": "thought",
+                    "strategy_key": f.get("strategy_key", ""),
+                })
+        if normalized:
+            existing_flags = state.get("in_game_flags", [])
+            update["in_game_flags"] = existing_flags + normalized
 
     return {**state, **update}
 
