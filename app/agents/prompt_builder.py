@@ -173,7 +173,7 @@ This is a thinking framework for the villager role during daytime discussion, fo
 
         if viewpoint_role.is_wolf_team:
             teammates = [p.id for p in state.players.values() if p.role and p.role.is_wolf_team]
-            prompt += f"🐺 狼人阵营mates: {', '.join(teammates)}\n"
+            prompt += f"🐺 狼队友: {', '.join(teammates)}\n"
 
         if viewpoint_role == Role.SEER:
             verified = []

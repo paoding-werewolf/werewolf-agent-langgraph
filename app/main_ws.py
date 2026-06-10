@@ -584,15 +584,24 @@ _CONFIRMATION_EXPIRE_INTERVAL_S = 600
 
 
 async def _confirmation_expire_loop(interval: float):
-    """定时检查：确认满足条件的 cluster + 清理过期建议。"""
+    """定时检查：确认满足条件的 cluster + 清理过期建议。
+
+    与手动确认共享 _global_pass_lock，防止并发确认同一个 cluster。
+    使用 asyncio.to_thread 避免同步 LLM/DB 操作阻塞事件循环。
+    """
     while True:
         await asyncio.sleep(interval)
         try:
             from evolution.config import load_config
-            cfg = load_config()
-            if not cfg.enabled:
-                continue
-            confirmed, expired = _run_confirmation_and_expire(cfg, expire=True)
+
+            def _do():
+                cfg = load_config()
+                if not cfg.enabled:
+                    return 0, 0
+                return _run_confirmation_and_expire(cfg, expire=True)
+
+            async with _global_pass_lock:
+                confirmed, expired = await asyncio.to_thread(_do)
             if confirmed:
                 logger.info(f"Confirmation expire loop: {confirmed} clusters confirmed")
             if expired:
@@ -1219,7 +1228,7 @@ async def _evo_buffer(request):
 
 
 async def _evo_cluster_pending(request):
-    """手动触发：将 pending 建议聚类。"""
+    """手动触发：将 pending 建议聚类。与自动聚类共享锁，防止并发冲突。"""
     try:
         from evolution.config import load_config
         from evolution.buffer_pool import BufferPool
@@ -1232,30 +1241,33 @@ async def _evo_cluster_pending(request):
             clustered = clusterer.process_pending()
             return {"clustered": len(clustered)}
 
-        result = await asyncio.to_thread(_do)
+        async with _global_pass_lock:
+            result = await asyncio.to_thread(_do)
         return aiohttp_web.json_response(result)
     except Exception as e:
         return aiohttp_web.json_response({"detail": str(e)}, status=500)
 
 
 async def _evo_confirm_clusters(request):
-    """手动触发：确认满足条件的 cluster 为新版本（异步，立即返回）。"""
+    """手动触发：确认满足条件的 cluster 为新版本。
+
+    与自动确认循环共享 _global_pass_lock，防止并发跑重复确认同一个 cluster。
+    await 等待完成而非 fire-and-forget，确保调用方拿到真实结果。
+    """
     try:
         from evolution.config import load_config
-        from evolution.buffer_pool import BufferPool
-        from evolution.confirmation import ConfirmationJudge
-        from evolution.version_manager import VersionManager
 
         def _do():
             cfg = load_config()
-            pool = BufferPool(cfg)
-            vm = VersionManager(cfg)
-            judge = ConfirmationJudge(cfg, pool, vm)
-            confirmed = judge.check_all_clusters()
-            logger.info(f"Background confirmation done: {len(confirmed)} clusters confirmed")
+            confirmed, _expired = _run_confirmation_and_expire(cfg, expire=False)
+            return {
+                "status": "completed",
+                "confirmed": confirmed,
+            }
 
-        asyncio.create_task(asyncio.to_thread(_do))
-        return aiohttp_web.json_response({"status": "started"})
+        async with _global_pass_lock:
+            result = await asyncio.to_thread(_do)
+        return aiohttp_web.json_response(result)
     except Exception as e:
         return aiohttp_web.json_response({"detail": str(e)}, status=500)
 
