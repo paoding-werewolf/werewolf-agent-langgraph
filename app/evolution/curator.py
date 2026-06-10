@@ -66,10 +66,24 @@ class Curator:
 
     def run(self) -> Dict:
         """执行 Curator 审查。返回操作摘要。"""
+        logger.info("[Curator] ========== 开始策展人运行 ==========")
         summary = {"phase1": {}, "phase2": {}}
 
+        logger.info("[Curator] 阶段一：确定性状态转移")
         summary["phase1"] = self._phase1_state_transitions()
+        p1 = summary["phase1"]
+        logger.info(f"[Curator] 阶段一结果: staled={len(p1.get('staled', []))}, archived={len(p1.get('archived', []))}")
+        if p1.get("staled"):
+            for s in p1["staled"]:
+                logger.info(f"  [Curator] active→stale: {s}")
+        if p1.get("archived"):
+            for s in p1["archived"]:
+                logger.info(f"  [Curator] stale→archived: {s}")
+
+        logger.info("[Curator] 阶段二：LLM 审查")
         summary["phase2"] = self._phase2_llm_review()
+        p2 = summary["phase2"]
+        logger.info(f"[Curator] 阶段二结果: reviewed={p2.get('reviewed', 0)}, kept={p2.get('kept', 0)}, patched={p2.get('patched', 0)}, consolidated={p2.get('consolidated', 0)}, archived={p2.get('archived', 0)}")
 
         confirmed, games = self._current_counts()
         self._save_state({
@@ -77,7 +91,8 @@ class Curator:
             "last_confirmed_count": confirmed,
             "last_total_games": games,
         })
-
+        logger.info(f"[Curator] 策展完成: confirmed={confirmed}, total_games={games}")
+        logger.info("[Curator] ========== 策展人运行结束 ==========")
         return summary
 
     def _phase1_state_transitions(self) -> Dict:
@@ -145,6 +160,7 @@ class Curator:
                     continue
 
                 if current_v.pinned or current_v.source == "bundled":
+                    logger.debug(f"  [Curator] 跳过 {skill.skill_name}/{current_v.version} (pinned={current_v.pinned}, source={current_v.source})")
                     continue
 
                 content = current_v.content_markdown
@@ -155,7 +171,9 @@ class Curator:
                     "last_used": current_v.last_used_at.isoformat() if current_v.last_used_at else "N/A",
                 }
 
+                logger.info(f"  [Curator] 审查 {skill.skill_name}/{current_v.version} (role={skill.role}, games={usage['games_played']}, wr={usage['win_rate']:.2f}, source={current_v.source})")
                 decision = self._llm_review_skill(content, usage, review_llm)
+                logger.info(f"  [Curator] → 判定: {decision}")
                 result["reviewed"] += 1
                 skills_reviewed += 1
 
