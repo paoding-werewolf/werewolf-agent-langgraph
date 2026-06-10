@@ -783,7 +783,7 @@ pip install -r requirements.txt
 编辑 `app/agents/llm_caller.py`：
 
 ```python
-self.api_key = "sk-YOUR_API_KEY"
+self.api_key = os.getenv("OPENAI_API_KEY")
 self.base_url = "https://api.openai.com/v1"  # 或其他兼容接口
 self.model = "gpt-4o"  # 或其他模型
 ```
