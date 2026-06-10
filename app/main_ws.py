@@ -689,25 +689,10 @@ async def _process_game_over(session_id: str, req_id: str,
         logger.info(f"Session {session_id}: skip_evolution=True (builtin AI in game), skipping post-game pipeline.")
         return {"type": "game_over_ack", "req_id": req_id, "skip_evolution": True}
 
-    from evolution.conjugate_agent import is_latest_conjugate
-
-    external_agent_id = state.get("external_agent_id", "")
-    if not is_latest_conjugate(external_agent_id):
-        logger.info(
-            "Session %s: external_agent_id=%s is frozen conjugate agent, skipping evolution pipeline.",
-            session_id,
-            external_agent_id,
-        )
-        return {
-            "type": "game_over_ack",
-            "req_id": req_id,
-            "skip_evolution": True,
-            "reason": "frozen_conjugate_agent",
-        }
-
     state["room_id"] = room_id
 
     # 立即写入对局归档（基本信息），不等 LLM 反思；pipeline 结束后 upsert 完整数据
+    # 此步骤在 frozen conjugate 判定之前，确保所有对局都有归档记录
     try:
         from memory.game_archive import save_game as _save_game_immediate
         _save_game_immediate(
@@ -724,6 +709,22 @@ async def _process_game_over(session_id: str, req_id: str,
         logger.info(f"Immediate game archive saved: room={room_id}, role={state['my_role']}, result={result}")
     except Exception:
         logger.exception(f"Failed to save immediate game archive for room={room_id}")
+
+    from evolution.conjugate_agent import is_latest_conjugate
+
+    external_agent_id = state.get("external_agent_id", "")
+    if not is_latest_conjugate(external_agent_id):
+        logger.info(
+            "Session %s: external_agent_id=%s is frozen conjugate agent, skipping evolution pipeline.",
+            session_id,
+            external_agent_id,
+        )
+        return {
+            "type": "game_over_ack",
+            "req_id": req_id,
+            "skip_evolution": True,
+            "reason": "frozen_conjugate_agent",
+        }
 
     asyncio.create_task(_run_post_game_pipeline(
         state, result, winner_role, all_roles, session_id, req_id, room_id
