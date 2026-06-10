@@ -128,14 +128,14 @@ class LLMCaller:
     def async_client(self) -> AsyncOpenAI:
         if self._async_client is None:
             base_url, _ = self._require_model_config()
-            self._async_client = AsyncOpenAI(api_key=self._require_api_key(), base_url=base_url)
+            self._async_client = AsyncOpenAI(api_key=self._require_api_key(), base_url=base_url, timeout=30.0)
         return self._async_client
 
     @property
     def client(self) -> OpenAI:
         if self._client is None:
             base_url, _ = self._require_model_config()
-            self._client = OpenAI(api_key=self._require_api_key(), base_url=base_url)
+            self._client = OpenAI(api_key=self._require_api_key(), base_url=base_url, timeout=60.0)
         return self._client
 
     async def _chat_with_tools(self, system_prompt: str, user_msg: str):
