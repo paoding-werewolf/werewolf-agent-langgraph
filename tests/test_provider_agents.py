@@ -93,6 +93,26 @@ def _add_skill(session, name: str, role: str, current_default: str, versions: li
     return skill
 
 
+def _add_markdown_skill(session, name: str, role: str, current_default: str, contents: dict[str, str]):
+    skill = EvolutionSkill(
+        skill_name=name,
+        role=role,
+        description=f"{name} strategy",
+        tags_json=[role],
+        current_default=current_default,
+    )
+    session.add(skill)
+    session.flush()
+    for version, content in contents.items():
+        session.add(EvolutionSkillVersion(
+            skill_id=skill.id,
+            version=version,
+            status="active" if version == current_default else "candidate",
+            content_markdown=content,
+        ))
+    return skill
+
+
 def _seed_initial_skills():
     session = get_session()
     try:
@@ -638,6 +658,79 @@ def test_process_init_persists_personality_prompt_from_game_context(monkeypatch)
     assert state["room_id"] == "room-20240520"
     assert state["working_memory"]["game_id"] == "room-20240520"
     assert state["personality_prompt"] == personality_prompt
+
+
+def test_skill_selection_index_uses_frontmatter_key_and_when_to_use():
+    session = get_session()
+    try:
+        _add_markdown_skill(session, "预言家身份跳明时机", "seer", "v1", {
+            "v1": """---
+name: seer-identity-authority
+description: 预言家身份策略
+role: seer
+---
+
+## When to Use
+首夜完成查验后，根据查验信息价值选择起跳窗口。
+
+## Playbook
+建立坐标轴。
+"""
+        })
+        session.commit()
+    finally:
+        session.close()
+
+    from evolution.config import load_config
+    from evolution.version_manager import VersionManager
+
+    vm = VersionManager(load_config())
+    index = vm.format_skill_selection_index("seer", {"预言家身份跳明时机": "v1"})
+
+    assert "key: `seer-identity-authority`" in index
+    assert "skill_name: `预言家身份跳明时机`" in index
+    assert "首夜完成查验后" in index
+
+
+def test_selected_skill_details_load_locked_version_by_key():
+    session = get_session()
+    try:
+        _add_markdown_skill(session, "预言家身份跳明时机", "seer", "v2", {
+            "v1": """---
+name: seer-identity-authority
+---
+
+## When to Use
+旧版本。
+""",
+            "v2": """---
+name: seer-identity-authority
+---
+
+## When to Use
+新版本。
+
+## Playbook
+读取锁定版本正文。
+""",
+        })
+        session.commit()
+    finally:
+        session.close()
+
+    from evolution.config import load_config
+    from evolution.version_manager import VersionManager
+
+    vm = VersionManager(load_config())
+    details = vm.format_selected_skills_for_prompt(
+        "seer",
+        {"预言家身份跳明时机": "v2"},
+        ["seer-identity-authority"],
+    )
+
+    assert "## Selected Strategy Details" in details
+    assert "读取锁定版本正文" in details
+    assert "旧版本" not in details
 
 
 def test_config_loads_confirmation_check_interval(monkeypatch, tmp_path):

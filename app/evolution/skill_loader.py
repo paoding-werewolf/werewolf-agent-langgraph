@@ -7,6 +7,7 @@
 """
 import logging
 import random
+import re
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone
 
@@ -57,6 +58,38 @@ class SkillLoader:
         lines = ["## Available Strategy Skills"]
         for s in relevant:
             lines.append(f"- **{s['name']}** (v{s['current_version']}): {s['description']}")
+        return "\n".join(lines)
+
+    def format_selection_index_for_prompt(self, my_role: str,
+                                          versions_used: Optional[dict] = None) -> str:
+        """为 reflect 阶段生成轻量策略索引，供模型选择需要读取的 key。"""
+        skills = self.load_index()
+        strategy_role = self._strategy_role(my_role)
+        relevant = [s for s in skills if s.get("role") in (strategy_role, "common")]
+        if not relevant:
+            return ""
+
+        version_map = versions_used or {}
+        lines = [
+            "## Strategy Skill Index",
+            "你当前只看到策略索引，不包含完整策略正文。",
+            "如果某条策略对当前局面有帮助，请在反思末尾输出：",
+            "[SELECTED_STRATEGIES: key1, key2]",
+            "key 必须原样复制下方索引中的 key，不要翻译、改写或使用中文标题。",
+            "默认选择 0-1 条；只有明显相关时最多选择 3 条。",
+            "",
+            "可用策略：",
+        ]
+        for s in relevant:
+            version = version_map.get(s["name"]) or f"v{s['current_version']}"
+            content = self.load_skill_full(s["name"], version=version)
+            key = self._extract_skill_key(content, s["name"])
+            when_to_use = self._extract_when_to_use(content) if content else ""
+            summary = when_to_use or s.get("description") or "无摘要"
+            lines.append(
+                f"- key: `{key}` | skill_name: `{s['name']}` | version: `{version}` | "
+                f"role: `{s['role']}` | when_to_use: {summary}"
+            )
         return "\n".join(lines)
 
     # ── Layer 2: 全文加载 ────────────────────────────────────
@@ -128,6 +161,66 @@ class SkillLoader:
                 loaded_parts.append(f"### Strategy: {s['name']}\n{content}")
 
         return "\n\n".join(loaded_parts)
+
+    def load_selected_skills_with_versions(self, my_role: str,
+                                           versions_used: dict,
+                                           selected_keys: list[str]) -> str:
+        """按 reflect 选出的 key 加载本局锁定版本全文。"""
+        if not selected_keys:
+            return ""
+
+        key_to_skill = self._build_key_to_skill_map(my_role, versions_used)
+        loaded_parts = []
+        seen = set()
+        for key in selected_keys[:3]:
+            skill_name = key_to_skill.get(key)
+            if not skill_name or skill_name in seen:
+                continue
+            seen.add(skill_name)
+            version = versions_used.get(skill_name)
+            content = self.load_skill_full(skill_name, version=version)
+            if content:
+                loaded_parts.append(f"### Strategy: {key}\n{content}")
+
+        return "\n\n".join(loaded_parts)
+
+    def _build_key_to_skill_map(self, my_role: str, versions_used: Optional[dict]) -> Dict[str, str]:
+        skills = self.load_index()
+        strategy_role = self._strategy_role(my_role)
+        relevant = [
+            s for s in skills
+            if s.get("role") in (strategy_role, "common")
+        ]
+
+        result = {}
+        version_map = versions_used or {}
+        for s in relevant:
+            version = version_map.get(s["name"])
+            content = self.load_skill_full(s["name"], version=version)
+            key = self._extract_skill_key(content, s["name"])
+            result[key] = s["name"]
+            result[s["name"]] = s["name"]
+        return result
+
+    def _extract_skill_key(self, content: Optional[str], fallback: str) -> str:
+        if not content:
+            return fallback
+        match = re.search(r"(?m)^name:\s*(.+?)\s*$", content)
+        if not match:
+            return fallback
+        return match.group(1).strip().strip("'\"") or fallback
+
+    def _extract_when_to_use(self, content: Optional[str]) -> str:
+        if not content:
+            return ""
+        match = re.search(
+            r"(?ms)^##\s+When to Use\s*\n(.+?)(?=\n##\s+|\Z)",
+            content,
+        )
+        if not match:
+            return ""
+        text = re.sub(r"\s+", " ", match.group(1)).strip()
+        return text[:500]
 
     # ── 版本竞争相关 ─────────────────────────────────────────
 

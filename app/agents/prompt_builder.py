@@ -81,13 +81,14 @@ class PromptBuilder:
         if extra_data and extra_data.get("self_model_text"):
             prompt += "\n---\n" + extra_data["self_model_text"]
 
-        # ── Evolved strategy injection (all roles) ──
+        # ── Evolved strategy injection ──
+        strategy_text = ""
         if extra_data and extra_data.get("evolution_strategies"):
             strategy_text = extra_data["evolution_strategies"]
-            if strategy_text:
-                prompt += f"\n---\n## Active Strategies (Evolved)\n{strategy_text}\n---"
 
-        # ── Villager thinking framework (good camp only) ──
+        if strategy_text:
+            prompt += f"\n---\n## Active Strategies (Evolved)\n{strategy_text}\n---"
+
         if include_thinking_framework and not self.agent_role.is_wolf_team:
             prompt += f"""
 

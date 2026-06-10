@@ -10,8 +10,13 @@ from agents.protocol import normalize_action_status, normalize_event_status
 DEATH_TRACE_ACTIONS = {"death", "vote_eliminate", "shoot_skill"}
 
 
-def _get_evolution_strategies(state: AgentState) -> str:
-    """从 state 读取 versions_used，按指定版本加载策略全文。"""
+def _get_strategy_role(state: AgentState) -> str:
+    my_role = state["my_role"]
+    return "wolf" if my_role in {"wolf", "wolf_king"} else my_role
+
+
+def _get_strategy_selection_index(state: AgentState) -> str:
+    """为 reflect 阶段加载轻量策略索引，不注入全文。"""
     versions_used = state.get("versions_used", {})
     if not versions_used:
         return ""
@@ -19,16 +24,33 @@ def _get_evolution_strategies(state: AgentState) -> str:
     from evolution.version_manager import VersionManager
     cfg = load_config()
     vm = VersionManager(cfg)
-    my_role = state["my_role"]
-    strategy_role = "wolf" if my_role in {"wolf", "wolf_king"} else my_role
-    return vm.format_skills_for_prompt(
-        strategy_role, state.get("phase", ""), versions_used
+    return vm.format_skill_selection_index(
+        _get_strategy_role(state), versions_used
     )
 
 
-def _build_prompt_extra_data(state: AgentState) -> dict:
+def _get_selected_strategy_details(state: AgentState) -> str:
+    """为 decision 阶段加载 reflect 选中的策略全文。"""
+    versions_used = state.get("versions_used", {})
+    selected = state.get("selected_strategies", [])
+    if not versions_used or not selected:
+        return ""
+    from evolution.config import load_config
+    from evolution.version_manager import VersionManager
+    cfg = load_config()
+    vm = VersionManager(cfg)
+    return vm.format_selected_skills_for_prompt(
+        _get_strategy_role(state), versions_used, selected
+    )
+
+
+def _build_prompt_extra_data(state: AgentState, strategy_mode: str = "details") -> dict:
     """组装 PromptBuilder 需要的可选上下文。"""
-    extra_data = {"evolution_strategies": _get_evolution_strategies(state)}
+    if strategy_mode == "index":
+        strategy_text = _get_strategy_selection_index(state)
+    else:
+        strategy_text = _get_selected_strategy_details(state)
+    extra_data = {"evolution_strategies": strategy_text}
     personality_prompt = str(state.get("personality_prompt") or "").strip()
     if personality_prompt:
         extra_data["personality_prompt"] = personality_prompt
@@ -37,6 +59,27 @@ def _build_prompt_extra_data(state: AgentState) -> dict:
         from memory.working_memory import WorkingMemory
         extra_data["working_memory"] = WorkingMemory.from_dict(wm_data)
     return extra_data
+
+
+def _extract_selected_strategies(reflection: str) -> list[str]:
+    """从反思文本末尾解析 [SELECTED_STRATEGIES: key1, key2]。"""
+    match = re.search(r"\[SELECTED_STRATEGIES:\s*(.*?)\]", reflection, re.IGNORECASE | re.DOTALL)
+    if not match:
+        return []
+
+    raw_items = re.split(r"[,，\n]+", match.group(1))
+    selected = []
+    seen = set()
+    for item in raw_items:
+        key = item.strip().strip("`'\" ")
+        if not key or key.lower() in {"none", "null", "无", "空"}:
+            continue
+        if key not in seen:
+            selected.append(key)
+            seen.add(key)
+        if len(selected) >= 3:
+            break
+    return selected
 
 
 PRIVATE_NIGHT_ACTIONS = {
@@ -189,11 +232,22 @@ async def _reflect_node(state: AgentState) -> AgentState:
 1. 浏览当前公开信息与历史广播，找出逻辑矛盾。
 2. 谁是最可疑的狼人？谁是已确认的神职？
 3. 你目前的立场是什么？你是否被怀疑？你将如何辩护？
+4. 根据 Strategy Skill Index 选择当前最需要读取的策略 key。默认选择 0-1 条，明显相关时最多 3 条。
 """
-    final_instr = "输出你的内心独白。请简洁且有逻辑。"
+    final_instr = (
+        "输出你的内心独白。请简洁且有逻辑。\n"
+        "最后单独输出一行：[SELECTED_STRATEGIES: key1, key2]；"
+        "如果没有需要读取的策略，输出：[SELECTED_STRATEGIES:]。"
+    )
 
     gs = _to_agent_game_state(state)
-    full_prompt = builder.build_decision_prompt(gs, task_guidance, final_instr, "", extra_data=_build_prompt_extra_data(state))
+    full_prompt = builder.build_decision_prompt(
+        gs,
+        task_guidance,
+        final_instr,
+        "",
+        extra_data=_build_prompt_extra_data(state, strategy_mode="index"),
+    )
 
     reflection = await llm.call_with_log(
         state["me_id"],
@@ -204,7 +258,10 @@ async def _reflect_node(state: AgentState) -> AgentState:
         state.get("external_agent_id", ""),
     )
 
-    update = {"last_thought": reflection}
+    update = {
+        "last_thought": reflection,
+        "selected_strategies": _extract_selected_strategies(reflection),
+    }
 
     # Extract in-game flags from this round's thought
     from evolution.in_game_flagger import InGameFlagger

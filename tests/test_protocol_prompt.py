@@ -3,7 +3,13 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))) + "/app")
 
-from agents.agent_graph import _build_prompt_extra_data, _parse_event, _route_by_phase, _to_agent_game_state
+from agents.agent_graph import (
+    _build_prompt_extra_data,
+    _extract_selected_strategies,
+    _parse_event,
+    _route_by_phase,
+    _to_agent_game_state,
+)
 from agents.llm_caller import LLMCaller
 from agents.prompt_builder import PromptBuilder
 from agents.protocol import normalize_action_status, normalize_event_status, normalize_status
@@ -30,6 +36,7 @@ def _state(phase="discussion", request=None):
         "request": request,
         "working_memory": None,
         "strategies_used": [],
+        "selected_strategies": [],
         "versions_used": {},
         "in_game_flags": [],
     }
@@ -398,6 +405,20 @@ def test_prompt_omits_personality_section_when_empty():
     prompt = PromptBuilder(Role.VILLAGER, "3")._get_core_task({})
 
     assert "### 表达风格" not in prompt
+
+
+def test_extract_selected_strategies_limits_and_deduplicates():
+    reflection = "分析...\n[SELECTED_STRATEGIES: `seer-identity-authority`, wolf-logic, seer-identity-authority, common]"
+
+    assert _extract_selected_strategies(reflection) == [
+        "seer-identity-authority",
+        "wolf-logic",
+        "common",
+    ]
+
+
+def test_extract_selected_strategies_allows_empty_selection():
+    assert _extract_selected_strategies("分析...\n[SELECTED_STRATEGIES:]") == []
 
 
 def test_parse_event_clears_sheriff_from_destroy_trace():

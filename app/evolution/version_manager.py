@@ -59,3 +59,24 @@ class VersionManager:
             parts.append(full_text)
 
         return "\n\n".join(parts)
+
+    def format_skill_selection_index(self, my_role: str,
+                                     versions_used: Optional[dict] = None) -> str:
+        """组装 reflect 阶段使用的轻量策略索引。"""
+        return self.loader.format_selection_index_for_prompt(my_role, versions_used)
+
+    def format_selected_skills_for_prompt(self, my_role: str,
+                                          versions_used: Optional[dict],
+                                          selected_keys: List[str]) -> str:
+        """按 reflect 选中的 key 组装决策阶段策略全文。"""
+        full_text = self.loader.load_selected_skills_with_versions(
+            my_role,
+            versions_used or {},
+            selected_keys,
+        )
+        if not full_text:
+            return ""
+        return "\n\n".join([
+            "## Selected Strategy Details",
+            full_text,
+        ])
