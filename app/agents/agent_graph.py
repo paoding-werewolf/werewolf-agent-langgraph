@@ -301,14 +301,28 @@ async def _reflect_node(state: AgentState) -> AgentState:
 
     parsed = _parse_reflection_json(reflection)
 
+    # Build display text: thought + flags + selected strategies
+    display_blocks = [parsed["thought"]]
+    new_flags = parsed["flags"]
+    selected = parsed["selected_strategies"]
+
+    if new_flags:
+        display_blocks.append("\n---\n### ⚑ 策略矛盾标记")
+        for f in new_flags:
+            if isinstance(f, dict):
+                key = f.get("strategy_key", "?")
+                reason = f.get("reason", str(f))
+                display_blocks.append(f"- **{key}**: {reason}")
+
+    if selected:
+        display_blocks.append(f"\n---\n### 📋 选用策略: {', '.join(selected)}")
+
     update = {
-        "last_thought": parsed["thought"],
-        "selected_strategies": parsed["selected_strategies"],
+        "last_thought": "\n".join(display_blocks),
+        "selected_strategies": selected,
     }
 
-    new_flags = parsed["flags"]
     if new_flags:
-        # Normalize flags to the format expected by downstream consumers
         normalized = []
         for f in new_flags:
             if isinstance(f, dict):
