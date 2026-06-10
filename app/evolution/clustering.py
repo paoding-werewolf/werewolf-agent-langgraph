@@ -27,19 +27,35 @@ class SuggestionClusterer:
         pending = self.pool.load_pending()
         logger.info(f"Processing {len(pending)} pending suggestions")
 
+        # 只查询一次 cluster 列表，避免每个 pending item 都查一遍
+        cluster_ids = self.pool.list_clusters()
+
         for suggestion in pending:
-            result = self._assign_to_cluster(suggestion)
-            processed.append({
-                "suggestion_id": suggestion.get("suggestion_id"),
-                "action": result["action"],
-                "cluster_id": result.get("cluster_id"),
-            })
-            logger.info(f"Suggestion {suggestion.get('suggestion_id', '?')}: {result['action']} -> {result.get('cluster_id', 'N/A')}")
-            self.pool.delete_pending(suggestion.get("_item_key") or suggestion.get("suggestion_id", ""))
+            item_key = suggestion.get("_item_key") or suggestion.get("suggestion_id", "")
+            try:
+                result = self._assign_to_cluster(suggestion, cluster_ids)
+                processed.append({
+                    "suggestion_id": suggestion.get("suggestion_id"),
+                    "action": result["action"],
+                    "cluster_id": result.get("cluster_id"),
+                })
+                logger.info(f"Suggestion {suggestion.get('suggestion_id', '?')}: {result['action']} -> {result.get('cluster_id', 'N/A')}")
+                # 删除 pending 时容忍并发竞态：另一个进程可能已删除
+                try:
+                    self.pool.delete_pending(item_key)
+                except Exception:
+                    logger.warning(f"Failed to delete pending item {item_key} (likely already deleted by concurrent process), skipping")
+            except Exception as e:
+                logger.exception(f"Failed to process suggestion {suggestion.get('suggestion_id', '?')}, skipping: {e}")
+                processed.append({
+                    "suggestion_id": suggestion.get("suggestion_id"),
+                    "action": "error",
+                    "error": str(e),
+                })
 
         return processed
 
-    def _assign_to_cluster(self, suggestion: Dict) -> Dict:
+    def _assign_to_cluster(self, suggestion: Dict, cluster_ids: List[str]) -> Dict:
         """将一条建议分配到最匹配的 cluster，或创建新 cluster。"""
         scene_tags = suggestion.get("scene_tags", {})
         target_skill = suggestion.get("suggestion", {}).get("target_skill", "")
@@ -47,7 +63,6 @@ class SuggestionClusterer:
         best_match = None
         best_score = 0
 
-        cluster_ids = self.pool.list_clusters()
         for cluster_id in cluster_ids:
             cluster = self.pool.load_cluster(cluster_id)
             if not cluster:

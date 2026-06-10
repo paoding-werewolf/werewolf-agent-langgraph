@@ -181,7 +181,7 @@ class BufferPool:
             session.close()
 
     def delete_pending(self, suggestion_id: str):
-        """删除已处理的 pending 建议。"""
+        """删除已处理的 pending 建议，容忍并发删除。"""
         session = get_session()
         try:
             item = session.query(EvolutionBufferItem).filter_by(
@@ -191,9 +191,12 @@ class BufferPool:
                 session.delete(item)
                 session.commit()
                 logger.debug(f"Pending deleted: {suggestion_id}")
+            else:
+                session.rollback()
+                logger.debug(f"Pending not found (already deleted?): {suggestion_id}")
         except Exception:
             session.rollback()
-            raise
+            logger.warning(f"Failed to delete pending {suggestion_id} (likely concurrent delete), ignoring")
         finally:
             session.close()
 
