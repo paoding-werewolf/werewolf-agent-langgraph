@@ -354,8 +354,8 @@ async def _process_act(session_id: str, agent_id: str, req_id: str, status: str,
                        message: str, round_num: int, on_frame=None) -> list:
     """处理行动请求 (按 session_id 路由).
 
-    返回帧列表: 无流式回调时先返回一帧 thought (思考过程回传), 再跟一帧
-    act_result; 有流式回调时 thought delta 会在生成过程中直接发送.
+    返回帧列表: 先返回一帧 thought (思考过程回传), 再跟一帧 act_result.
+    不发送 delta 流式帧: 前端按独立消息渲染每个帧, 流式增量会显示成碎片.
     """
     real_sid = store.resolve_session_id(session_id)
     state = store.get(session_id)
@@ -369,31 +369,9 @@ async def _process_act(session_id: str, agent_id: str, req_id: str, status: str,
         "round": round_num,
     }
     stream_id = f"{req_id}:reflect"
-    streamed_parts = []
-
-    async def handle_thought_delta(delta: str) -> None:
-        if not on_frame or not delta:
-            return
-        streamed_parts.append(delta)
-        await on_frame({
-            "type": "thought",
-            "session_id": session_id,
-            "agent_id": agent_id,
-            "round": round_num,
-            "phase": status,
-            "content": delta,
-            "delta": delta,
-            "stream_id": stream_id,
-            "stream_status": "delta",
-            "seq": 0,
-        })
 
     # LLM 调用是异步的，直接 await
-    result = await run_act(
-        state,
-        req_dict,
-        on_thought_delta=handle_thought_delta if on_frame else None,
-    )
+    result = await run_act(state, req_dict)
     store.set(real_sid, result)
 
     frames = []
@@ -413,18 +391,7 @@ async def _process_act(session_id: str, agent_id: str, req_id: str, status: str,
             "stream_status": "done",
             "seq": 0,
         })
-    elif thought.startswith("ERROR:") and on_frame and streamed_parts:
-        frames.append({
-            "type": "thought",
-            "session_id": session_id,
-            "agent_id": agent_id,
-            "round": round_num,
-            "phase": status,
-            "content": "".join(streamed_parts),
-            "stream_id": stream_id,
-            "stream_status": "error",
-            "seq": 0,
-        })
+    # ERROR 开头的思考是 LLM 调用失败的降级结果, 不回传给前端展示.
 
     action = result.get("next_action", {})
     frames.append({
