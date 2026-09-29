@@ -279,15 +279,25 @@ class LLMCaller:
     def client(self) -> "_SyncFailoverClient":
         return _SyncFailoverClient(self)
 
-    async def _chat_with_tools(self, system_prompt: str, user_msg: str):
+    async def _chat_with_tools(self, system_prompt: str, user_msg: str, phase: str = ""):
         _, model = self._require_model_config()
+        tools = self._allowed_tools(phase)
+        if tools:
+            allowed_names = ", ".join(t["function"]["name"] for t in tools)
+            system_prompt = (
+                f"{system_prompt}\n\n"
+                f"[当前阶段行动约束] 本阶段你只能调用以下工具之一：{allowed_names}。"
+                f"不要输出纯文本，不要调用列表之外的任何工具。"
+            )
+        else:
+            tools = TOOLS
         resp = await self.async_client.chat.completions.create(
             model=model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_msg},
             ],
-            tools=TOOLS,
+            tools=tools,
             tool_choice="auto",
             temperature=self.temperature,
         )
@@ -342,6 +352,43 @@ class LLMCaller:
         ("wolf_kill", "wolf_kill"),
         ("shoot", "shoot"),
     )
+    # 按阶段收窄模型可用的工具列表（源头防止选错工具）；未列出的阶段不限制
+    _PHASE_ALLOWED_TOOLS: Dict[str, tuple] = {
+        "guard_action": ("guard_protect", "pass_turn"),
+        "wolf_chat": ("wolf_chat", "speak", "pass_turn"),
+        "wolf_kill": ("wolf_kill", "pass_turn"),
+        "seer_check": ("seer_check", "pass_turn"),
+        "witch_action": ("witch_heal", "witch_poison", "pass_turn"),
+        "shoot_skill": ("shoot", "pass_turn"),
+        "discussion": ("speak", "pass_turn"),
+        "vote": ("vote", "pass_turn"),
+        "sheriff_election_signup": ("decide_signup", "pass_turn"),
+        "sheriff_election_speech": ("speak", "pass_turn"),
+        "sheriff_pk_speech": ("speak", "pass_turn"),
+        "last_words": ("speak", "pass_turn"),
+        "sheriff_election_vote": ("vote_sheriff", "pass_turn"),
+        "sheriff_pk_vote": ("vote_sheriff", "pass_turn"),
+        "sheriff_choose": ("choose_speech_order", "pass_turn"),
+        "sheriff_transfer": ("choose_speech_order", "pass_turn"),
+    }
+
+    @classmethod
+    def _allowed_tools(cls, phase: str):
+        """返回该阶段允许的工具子集；未知阶段返回 None（不限制）。"""
+        p = (phase or "").lower()
+        if not p:
+            return None
+        allowed = cls._PHASE_ALLOWED_TOOLS.get(p)
+        if allowed is None:
+            # 长键优先的子串回退（如带前后缀的变体阶段名）
+            for phase_key in sorted(cls._PHASE_ALLOWED_TOOLS, key=len, reverse=True):
+                if phase_key in p:
+                    allowed = cls._PHASE_ALLOWED_TOOLS[phase_key]
+                    break
+        if allowed is None:
+            return None
+        tools = [t for t in TOOLS if t["function"]["name"] in allowed]
+        return tools or None
 
     @classmethod
     def _tool_matches_phase(cls, phase: str, tool: str) -> bool:
@@ -360,7 +407,7 @@ class LLMCaller:
                                 system_prompt: str, user_msg: str,
                                 session_id: str = "", external_agent_id: str = "") -> Optional[Dict[str, Any]]:
         try:
-            message = await self._chat_with_tools(system_prompt, user_msg)
+            message = await self._chat_with_tools(system_prompt, user_msg, phase=phase)
         except Exception as e:
             err = f"ERROR: {str(e)}"
             prompt_logger.log(agent_id, phase, system_prompt, user_msg, err, session_id, external_agent_id)
