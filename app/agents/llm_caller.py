@@ -332,6 +332,30 @@ class LLMCaller:
 
         return action
 
+    # 发言类阶段: speak 等表达型工具均合法
+    _VERBAL_PHASE_KEYWORDS = ("discussion", "last_words", "wolf_chat", "sheriff", "speech")
+    # 技能阶段: 工具名必须以对应前缀开头（witch_action→witch_*，guard_action→guard_*……）
+    _SKILL_PHASE_PREFIXES = (
+        ("witch", "witch"),
+        ("guard", "guard"),
+        ("seer", "seer"),
+        ("wolf_kill", "wolf_kill"),
+        ("shoot", "shoot"),
+    )
+
+    @classmethod
+    def _tool_matches_phase(cls, phase: str, tool: str) -> bool:
+        p = (phase or "").lower()
+        t = (tool or "").lower()
+        if t == "pass_turn":
+            return True
+        if any(k in p for k in cls._VERBAL_PHASE_KEYWORDS):
+            return True
+        for phase_key, tool_prefix in cls._SKILL_PHASE_PREFIXES:
+            if phase_key in p:
+                return t.startswith(tool_prefix)
+        return True
+
     async def decide_with_tools(self, agent_id: str, phase: str,
                                 system_prompt: str, user_msg: str,
                                 session_id: str = "", external_agent_id: str = "") -> Optional[Dict[str, Any]]:
@@ -363,6 +387,19 @@ class LLMCaller:
 
         if tool_calls:
             tc = tool_calls[0]
+            if not self._tool_matches_phase(phase, tc.function.name):
+                # 模型在本阶段调用了不匹配的工具（如女巫行动阶段 speak）。
+                # 不能放行：下游会从 result 文本里抽取座位号当目标，
+                # 曾导致女巫把文本里自报的"7号"当成毒杀目标毒死自己。
+                # 降级为 PASS，走引擎正规的"放弃技能/跳过"路径。
+                return {
+                    "result": "PASS",
+                    "target": None,
+                    "extra": {"degraded_tool": tc.function.name},
+                    "thought": content,
+                    "error_type": AgentErrorType.LLM_UNEXPECTED_OUTPUT.value,
+                    "error": f"tool {tc.function.name} is not valid in phase {phase}; degraded to PASS",
+                }
             try:
                 args = json.loads(tc.function.arguments or "{}")
             except json.JSONDecodeError:
