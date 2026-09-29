@@ -1,12 +1,46 @@
 import json
 import os
 import re
+import threading
 from enum import Enum
+from pathlib import Path
 from typing import Awaitable, Callable, Optional, Dict, Any
 
+import yaml
 from openai import AsyncOpenAI, OpenAI
 
 from utils.prompt_logger import prompt_logger
+
+
+_LLM_CONFIG_PATH = Path(os.getenv("WEREWOLF_AGENT_HOME", "~/.werewolf-agent")).expanduser() / "config.yaml"
+_rt_cache: Dict[str, Any] = {"mtime": None, "config": {}}
+_rt_lock = threading.Lock()
+
+
+def _runtime_llm_config() -> Dict[str, Any]:
+    """按 mtime 热加载 config.yaml 顶层 llm 段。
+
+    结构：
+      llm:
+        api_key / base_url / model        # 全局默认（覆盖环境变量）
+        overrides:                         # 按模型名路由端点（可选）
+          "<model_name>": {api_key, base_url}
+    修改文件即生效，无需重启容器。
+    """
+    try:
+        mtime = _LLM_CONFIG_PATH.stat().st_mtime
+    except OSError:
+        return _rt_cache["config"]
+    with _rt_lock:
+        if _rt_cache["mtime"] != mtime:
+            try:
+                with open(_LLM_CONFIG_PATH) as f:
+                    raw = yaml.safe_load(f) or {}
+                _rt_cache["config"] = raw.get("llm") or {}
+            except Exception:
+                pass
+            _rt_cache["mtime"] = mtime
+    return _rt_cache["config"]
 
 
 def _fn(name: str, description: str, properties: Dict[str, Any], required: list) -> Dict[str, Any]:
@@ -127,37 +161,59 @@ def _error_action(error_type: AgentErrorType, message: str) -> Dict[str, Any]:
 
 class LLMCaller:
     def __init__(self):
-        self.api_key = os.getenv("OPENAI_API_KEY")
-        self.base_url = os.getenv("OPENAI_BASE_URL")
-        self.model = os.getenv("OPENAI_MODEL")
+        # 端点与模型在每次调用时动态解析 (config.yaml llm 段 → 环境变量兜底)，
+        # 支持不改容器热切换；self.model 可被进化各阶段按需覆盖。
+        self.model: Optional[str] = None
         self.temperature = 0.7
         self._async_client: Optional[AsyncOpenAI] = None
         self._client: Optional[OpenAI] = None
+        self._async_sig: Optional[tuple] = None
+        self._sync_sig: Optional[tuple] = None
+
+    def _resolve_endpoint(self) -> tuple[str, str, str]:
+        """返回 (api_key, base_url, model)，优先级：config.yaml llm 段 > 环境变量。"""
+        rt = _runtime_llm_config()
+        model = self.model or rt.get("model") or os.getenv("OPENAI_MODEL")
+        overrides = rt.get("overrides") or {}
+        ov = overrides.get(model) or {} if model else {}
+        api_key = ov.get("api_key") or rt.get("api_key") or os.getenv("OPENAI_API_KEY")
+        base_url = ov.get("base_url") or rt.get("base_url") or os.getenv("OPENAI_BASE_URL")
+        return api_key, base_url, model
 
     def _require_api_key(self) -> str:
-        if not self.api_key:
+        api_key, _, _ = self._resolve_endpoint()
+        if not api_key:
             raise RuntimeError("OPENAI_API_KEY is required for LLM calls")
-        return self.api_key
+        return api_key
 
     def _require_model_config(self) -> tuple[str, str]:
-        if not self.base_url:
+        _, base_url, model = self._resolve_endpoint()
+        if not base_url:
             raise RuntimeError("OPENAI_BASE_URL is required for LLM calls")
-        if not self.model:
+        if not model:
             raise RuntimeError("OPENAI_MODEL is required for LLM calls")
-        return self.base_url, self.model
+        return base_url, model
 
     @property
     def async_client(self) -> AsyncOpenAI:
-        if self._async_client is None:
-            base_url, _ = self._require_model_config()
-            self._async_client = AsyncOpenAI(api_key=self._require_api_key(), base_url=base_url, timeout=30.0)
+        api_key, base_url, _ = self._resolve_endpoint()
+        sig = (base_url, api_key)
+        if self._async_client is None or self._async_sig != sig:
+            self._async_client = AsyncOpenAI(
+                api_key=self._require_api_key(), base_url=self._require_model_config()[0], timeout=120.0
+            )
+            self._async_sig = sig
         return self._async_client
 
     @property
     def client(self) -> OpenAI:
-        if self._client is None:
-            base_url, _ = self._require_model_config()
-            self._client = OpenAI(api_key=self._require_api_key(), base_url=base_url, timeout=60.0)
+        api_key, base_url, _ = self._resolve_endpoint()
+        sig = (base_url, api_key)
+        if self._client is None or self._sync_sig != sig:
+            self._client = OpenAI(
+                api_key=self._require_api_key(), base_url=self._require_model_config()[0], timeout=180.0
+            )
+            self._sync_sig = sig
         return self._client
 
     async def _chat_with_tools(self, system_prompt: str, user_msg: str):
