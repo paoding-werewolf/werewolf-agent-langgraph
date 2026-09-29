@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 import threading
@@ -10,6 +11,8 @@ import yaml
 from openai import AsyncOpenAI, OpenAI
 
 from utils.prompt_logger import prompt_logger
+
+logger = logging.getLogger(__name__)
 
 
 _LLM_CONFIG_PATH = Path(os.getenv("WEREWOLF_AGENT_HOME", "~/.werewolf-agent")).expanduser() / "config.yaml"
@@ -159,62 +162,122 @@ def _error_action(error_type: AgentErrorType, message: str) -> Dict[str, Any]:
     }
 
 
+class _SyncFailoverClient:
+    """同步 LLM 客户端代理：按主备链路执行 create，主端点异常自动切换备用。"""
+
+    def __init__(self, caller: "LLMCaller"):
+        self._caller = caller
+
+    @property
+    def chat(self):
+        return self
+
+    @property
+    def completions(self):
+        return self
+
+    def create(self, **kwargs):
+        last: Optional[Exception] = None
+        for i, (api_key, base_url, model) in enumerate(self._caller._endpoint_chain()):
+            try:
+                client = self._caller._sdk_client(api_key, base_url, sync=True)
+                kwargs["model"] = model
+                resp = client.chat.completions.create(**kwargs)
+                if i:
+                    logger.warning("LLM 主端点失败, 已切换备用端点 %s", base_url)
+                return resp
+            except Exception as e:
+                last = e
+                logger.warning("LLM 端点失败 (%s): %s; 尝试下一端点", base_url, e)
+        raise last
+
+
+class _AsyncFailoverClient:
+    """异步 LLM 客户端代理：主备链路语义同 _SyncFailoverClient。"""
+
+    def __init__(self, caller: "LLMCaller"):
+        self._caller = caller
+
+    @property
+    def chat(self):
+        return self
+
+    @property
+    def completions(self):
+        return self
+
+    async def create(self, **kwargs):
+        last: Optional[Exception] = None
+        for i, (api_key, base_url, model) in enumerate(self._caller._endpoint_chain()):
+            try:
+                client = self._caller._sdk_client(api_key, base_url, sync=False)
+                kwargs["model"] = model
+                resp = await client.chat.completions.create(**kwargs)
+                if i:
+                    logger.warning("LLM 主端点失败, 已切换备用端点 %s", base_url)
+                return resp
+            except Exception as e:
+                last = e
+                logger.warning("LLM 端点失败 (%s): %s; 尝试下一端点", base_url, e)
+        raise last
+
+
 class LLMCaller:
     def __init__(self):
         # 端点与模型在每次调用时动态解析 (config.yaml llm 段 → 环境变量兜底)，
-        # 支持不改容器热切换；self.model 可被进化各阶段按需覆盖。
+        # 支持不改容器热切换；主端点异常自动按 llm.backups 顺序切换备用。
         self.model: Optional[str] = None
         self.temperature = 0.7
-        self._async_client: Optional[AsyncOpenAI] = None
-        self._client: Optional[OpenAI] = None
-        self._async_sig: Optional[tuple] = None
-        self._sync_sig: Optional[tuple] = None
+        self._clients: Dict[tuple, Any] = {}
 
-    def _resolve_endpoint(self) -> tuple[str, str, str]:
-        """返回 (api_key, base_url, model)，优先级：config.yaml llm 段 > 环境变量。"""
+    def _endpoint_chain(self) -> list[tuple[str, str, str]]:
+        """按优先级返回 (api_key, base_url, model)：主端点 + llm.backups 备用链。"""
         rt = _runtime_llm_config()
         model = self.model or rt.get("model") or os.getenv("OPENAI_MODEL")
         overrides = rt.get("overrides") or {}
         ov = overrides.get(model) or {} if model else {}
         api_key = ov.get("api_key") or rt.get("api_key") or os.getenv("OPENAI_API_KEY")
         base_url = ov.get("base_url") or rt.get("base_url") or os.getenv("OPENAI_BASE_URL")
-        return api_key, base_url, model
+        chain = [(api_key, base_url, model)]
+        for backup in rt.get("backups") or []:
+            b_url = backup.get("base_url")
+            if not b_url:
+                continue
+            chain.append((
+                backup.get("api_key") or api_key,
+                b_url,
+                backup.get("model") or model,
+            ))
+        return [(k, u, m) for k, u, m in chain if k and u and m]
+
+    def _sdk_client(self, api_key: str, base_url: str, sync: bool):
+        key = (sync, base_url, api_key)
+        if key not in self._clients:
+            cls = OpenAI if sync else AsyncOpenAI
+            self._clients[key] = cls(
+                api_key=api_key, base_url=base_url, timeout=180.0 if sync else 120.0
+            )
+        return self._clients[key]
 
     def _require_api_key(self) -> str:
-        api_key, _, _ = self._resolve_endpoint()
-        if not api_key:
+        chain = self._endpoint_chain()
+        if not chain:
             raise RuntimeError("OPENAI_API_KEY is required for LLM calls")
-        return api_key
+        return chain[0][0]
 
     def _require_model_config(self) -> tuple[str, str]:
-        _, base_url, model = self._resolve_endpoint()
-        if not base_url:
+        chain = self._endpoint_chain()
+        if not chain:
             raise RuntimeError("OPENAI_BASE_URL is required for LLM calls")
-        if not model:
-            raise RuntimeError("OPENAI_MODEL is required for LLM calls")
-        return base_url, model
+        return chain[0][1], chain[0][2]
 
     @property
-    def async_client(self) -> AsyncOpenAI:
-        api_key, base_url, _ = self._resolve_endpoint()
-        sig = (base_url, api_key)
-        if self._async_client is None or self._async_sig != sig:
-            self._async_client = AsyncOpenAI(
-                api_key=self._require_api_key(), base_url=self._require_model_config()[0], timeout=120.0
-            )
-            self._async_sig = sig
-        return self._async_client
+    def async_client(self) -> "_AsyncFailoverClient":
+        return _AsyncFailoverClient(self)
 
     @property
-    def client(self) -> OpenAI:
-        api_key, base_url, _ = self._resolve_endpoint()
-        sig = (base_url, api_key)
-        if self._client is None or self._sync_sig != sig:
-            self._client = OpenAI(
-                api_key=self._require_api_key(), base_url=self._require_model_config()[0], timeout=180.0
-            )
-            self._sync_sig = sig
-        return self._client
+    def client(self) -> "_SyncFailoverClient":
+        return _SyncFailoverClient(self)
 
     async def _chat_with_tools(self, system_prompt: str, user_msg: str):
         _, model = self._require_model_config()
