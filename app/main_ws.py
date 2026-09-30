@@ -37,6 +37,7 @@ import logging
 import os
 import signal
 import sys
+import threading
 import uuid
 from urllib.parse import urlsplit, parse_qs
 
@@ -602,6 +603,8 @@ async def _http_debug_view(request):
 _global_pass_lock = asyncio.Lock()
 _global_pass_task = None
 _GLOBAL_PASS_DEBOUNCE_S = 8.0
+# 对局后管线的 DB 写入锁：反思在 worker 线程并行跑 LLM，落库串行避免 sqlite 写冲突
+_post_game_io_lock = threading.Lock()
 
 
 async def _schedule_global_evolution_pass(cfg) -> None:
@@ -862,78 +865,58 @@ def _save_minimal_archive(room_id: str, result: str, winner_role: str, all_roles
         session.close()
 
 
-async def _run_post_game_pipeline(state: dict, result: str,
-                                   winner_role: str, all_roles: dict,
-                                   session_id: str, req_id: str,
-                                   room_id: str = ""):
-    """对局结束后完整管道：反思 → 缓冲 → 记忆更新。"""
-    try:
-        from evolution.config import load_config
-        from evolution.reflection_engine import ReflectionEngine, format_game_trace
-        from evolution.buffer_pool import BufferPool
-        from evolution.version_manager import VersionManager
-        from memory.game_archive import save_game, record_strategy_gap
-        from memory.self_model import update_self_model
-        from memory.opponent_model import update_opponent_from_game
-        from agents.llm_caller import llm
+def _post_game_sync_stage(state: dict, result: str, room_id: str, cfg) -> bool:
+    """反思 → 缓冲 → 归档 → 版本使用记录（同步阻塞段，必须在 worker 线程执行）。
 
-        cfg = load_config()
-        if not cfg.enabled:
-            return
+    engine.reflect 内部走 _SyncFailoverClient（同步 LLM 调用，带重试可达分钟级），
+    在事件循环上执行会拖死对局 WS 与 HTTP 接口；这里整体放入线程，LLM 调用并行，
+    DB 写入用 _post_game_io_lock 串行。返回是否产生了反思（决定是否安排聚类批次）。
+    """
+    from evolution.reflection_engine import ReflectionEngine, format_game_trace
+    from evolution.buffer_pool import BufferPool
+    from evolution.version_manager import VersionManager
+    from memory.game_archive import save_game, record_strategy_gap
 
-        # 1. Format trace
-        game_trace = format_game_trace(state.get("events", []), state.get("players", {}))
+    game_trace = format_game_trace(state.get("events", []), state.get("players", {}))
+    flags = list(state.get("in_game_flags", []))
 
-        # 2. Get in-game flags (accumulated during gameplay by _reflect_node)
-        flags = list(state.get("in_game_flags", []))
+    vm = VersionManager(cfg)
+    current_strategies = vm.format_skills_for_prompt(
+        state["my_role"],
+        state.get("phase", ""),
+        state.get("versions_used", {}),
+    )
 
-        # 3. Load current strategies
-        vm = VersionManager(cfg)
-        current_strategies = vm.format_skills_for_prompt(
-            state["my_role"],
-            state.get("phase", ""),
-            state.get("versions_used", {}),
-        )
+    working_memory_text = ""
+    wm_data = state.get("working_memory")
+    if wm_data:
+        from memory.working_memory import WorkingMemory
+        wm = WorkingMemory.from_dict(wm_data)
+        working_memory_text = wm.format_for_prompt()
 
-        # 3.1 Initialize buffer pool (shared for ingest + expire)
-        pool = BufferPool(cfg)
+    engine = ReflectionEngine(cfg)
+    reflection = engine.reflect(
+        game_id=room_id or state.get("room_id", "unknown"),
+        my_role=state["my_role"],
+        my_seat=state["me_id"],
+        result=result,
+        game_trace=game_trace,
+        in_game_flags=flags,
+        current_strategies=current_strategies,
+        working_memory_text=working_memory_text,
+    )
 
-        # 4. Execute reflection
-        # 3.5 Format working memory
-        working_memory_text = ""
-        wm_data = state.get("working_memory")
-        if wm_data:
-            from memory.working_memory import WorkingMemory
-            wm = WorkingMemory.from_dict(wm_data)
-            working_memory_text = wm.format_for_prompt()
-
-        engine = ReflectionEngine(cfg)
-        reflection = engine.reflect(
-            game_id=room_id or state.get("room_id", "unknown"),
-            my_role=state["my_role"],
-            my_seat=state["me_id"],
-            result=result,
-            game_trace=game_trace,
-            in_game_flags=flags,
-            current_strategies=current_strategies,
-            working_memory_text=working_memory_text,
-        )
-
+    with _post_game_io_lock:
         if reflection:
-            # 5. Write to buffer pool
+            pool = BufferPool(cfg)
             pool.ingest(reflection)
 
-            # 6. 聚类每局去抖动统一跑一次（坍缩 12 席并发）；确认/过期由独立定时任务处理
-            await _schedule_global_evolution_pass(cfg)
-
-            # 8. Record strategy_gap
             if reflection.suggestion.match_level in ("low", "strategy_gap"):
                 record_strategy_gap(
                     reflection.game_id,
                     f"{reflection.scene_tags.role}_{reflection.scene_tags.critical_phase}"
                 )
 
-            # 9. Archive game
             import yaml
             from dataclasses import asdict
             save_game(
@@ -952,7 +935,41 @@ async def _run_post_game_pipeline(state: dict, result: str,
                 versions_used=state.get("versions_used", {}),
             )
 
-        # 10. Update self model (sync LLM → to_thread to avoid blocking event loop)
+        # 版本使用记录与反思成败无关，始终记录（版本竞争依赖它）
+        versions_used = state.get("versions_used", {})
+        if versions_used:
+            won = (result == "won")
+            for skill_name, version in versions_used.items():
+                vm.record_usage(skill_name, version, won)
+
+    return reflection is not None
+
+
+async def _run_post_game_pipeline(state: dict, result: str,
+                                   winner_role: str, all_roles: dict,
+                                   session_id: str, req_id: str,
+                                   room_id: str = ""):
+    """对局结束后完整管道：反思 → 缓冲 → 记忆更新。
+
+    反思/入库/归档是同步阻塞段（含同步 LLM 调用），整体放入 worker 线程执行：
+    一局结束 12 个席位的反思不再堵塞事件循环，对局 WS 与 HTTP 接口保持响应。
+    """
+    try:
+        from evolution.config import load_config
+        from memory.self_model import update_self_model
+        from memory.opponent_model import update_opponent_from_game
+        from agents.llm_caller import llm
+
+        cfg = load_config()
+        if not cfg.enabled:
+            return
+
+        reflected = await asyncio.to_thread(_post_game_sync_stage, state, result, room_id, cfg)
+        if reflected:
+            # 聚类每局去抖动统一跑一次（坍缩 12 席并发）；确认/过期由独立定时任务处理
+            await _schedule_global_evolution_pass(cfg)
+
+        # 记忆更新（同步 LLM → to_thread，不阻塞事件循环）
         await asyncio.to_thread(
             update_self_model,
             state["my_role"],
@@ -961,8 +978,7 @@ async def _run_post_game_pipeline(state: dict, result: str,
             llm,
         )
 
-        # 10.1 Update opponent models (Layer 2) — concurrent to_thread to avoid blocking
-        from memory.opponent_model import update_opponent_from_game
+        # 对手模型（Layer 2）— 并发 to_thread
         my_seat = state.get("me_id", "")
         opponent_tasks = []
         for player_id, player_role in (all_roles or {}).items():
@@ -978,15 +994,6 @@ async def _run_post_game_pipeline(state: dict, result: str,
                 )
         if opponent_tasks:
             await asyncio.gather(*opponent_tasks)
-
-        # 10.5 Record version usage for version competition
-        versions_used = state.get("versions_used", {})
-        if versions_used:
-            won = (result == "won")
-            for skill_name, version in versions_used.items():
-                vm.record_usage(skill_name, version, won)
-
-        # 11/12. 确认 + 过期清理已移至独立定时任务 _confirmation_expire_loop（每小时一次）
 
         logger.info(f"Post-game pipeline complete for session {session_id}: result={result}")
     except Exception:
