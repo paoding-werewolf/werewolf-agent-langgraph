@@ -36,7 +36,7 @@ logger = logging.getLogger("gepa")
 # ── 适应度维度 ─────────────────────────────────────────────────
 FITNESS_DIMENSIONS = ["win_rate", "consistency", "deception", "info_utilization"]
 
-# ── 阵营过滤（gepa.faction_filter: all / good / wolf）──────────
+# ── 阵营/角色过滤（gepa.faction_filter + gepa.role_filter）────
 # good 含 common：警长归票术、好人阵营交叉验证等通用但偏向好人侧的策略
 FACTION_ROLES = {
     "good": {"villager", "seer", "witch", "hunter", "guard", "common"},
@@ -50,6 +50,12 @@ def _faction_roles(faction: str) -> Optional[set]:
     if faction in ("", "all"):
         return None
     return FACTION_ROLES.get(faction)
+
+
+def _role_filter_roles(role_filter: str) -> Optional[List[str]]:
+    """解析角色过滤配置（逗号分隔，如 "seer" 或 "seer,witch"）；空值返回 None。"""
+    roles = [r.strip().lower() for r in (role_filter or "").split(",") if r.strip()]
+    return roles or None
 
 
 # ── GEPA 主类 ──────────────────────────────────────────────────
@@ -98,6 +104,7 @@ class GEPA:
             "total_generations": self.gepa_cfg.num_generations,
             "population_size": self.gepa_cfg.population_size,
             "faction_filter": (self.gepa_cfg.faction_filter or "all").strip().lower(),
+            "role_filter": (self.gepa_cfg.role_filter or "").strip().lower(),
             "started_at": now,
             "updated_at": now,
             "completed_at": None,
@@ -201,7 +208,8 @@ class GEPA:
 
         logger.info(
             f"GEPA: 启动进化，种群={len(population)}，代数={gepa_cfg.num_generations}，"
-            f"阵营过滤={self.gepa_cfg.faction_filter}，角色分布=[{role_dist}]"
+            f"阵营过滤={self.gepa_cfg.faction_filter}，角色过滤={self.gepa_cfg.role_filter or '无'}，"
+            f"角色分布=[{role_dist}]"
         )
 
         for gen in range(1, gepa_cfg.num_generations + 1):
@@ -339,26 +347,37 @@ class GEPA:
 
     # ── 前置条件检查 ──────────────────────────────────────────
 
+    def _filtered_skill_query(self, session):
+        """按 faction_filter + role_filter（取交集）过滤策略池。"""
+        query = session.query(EvolutionSkill)
+        roles = _faction_roles(self.gepa_cfg.faction_filter)
+        if roles is not None:
+            query = query.filter(EvolutionSkill.role.in_(roles))
+        role_list = _role_filter_roles(self.gepa_cfg.role_filter)
+        if role_list is not None:
+            query = query.filter(EvolutionSkill.role.in_(role_list))
+        return query
+
     def _check_prerequisites(self) -> Dict[str, Any]:
-        """检查 GEPA 运行的前置条件（按 faction_filter 过滤后的策略池）。"""
+        """检查 GEPA 运行的前置条件（按 faction_filter/role_filter 过滤后的策略池）。"""
         if not self.gepa_cfg.enabled:
             return {"ok": False, "reason": "GEPA 未启用 (gepa.enabled=false)"}
 
-        roles = _faction_roles(self.gepa_cfg.faction_filter)
+        role_list = _role_filter_roles(self.gepa_cfg.role_filter)
         session = get_session()
         try:
-            skill_query = session.query(EvolutionSkill)
-            if roles is not None:
-                skill_query = skill_query.filter(EvolutionSkill.role.in_(roles))
-            skill_count = skill_query.count()
-            if skill_count < self.gepa_cfg.min_skills_in_library:
-                return {
-                    "ok": False,
-                    "reason": (
-                        f"策略库不足: 有 {skill_count} 个策略，"
-                        f"至少需要 {self.gepa_cfg.min_skills_in_library}"
-                    ),
-                }
+            skill_query = self._filtered_skill_query(session)
+            # 角色过滤是有意缩小范围，单角色池可能只有 1 个策略，不适用数量下限
+            if role_list is None:
+                skill_count = skill_query.count()
+                if skill_count < self.gepa_cfg.min_skills_in_library:
+                    return {
+                        "ok": False,
+                        "reason": (
+                            f"策略库不足: 有 {skill_count} 个策略，"
+                            f"至少需要 {self.gepa_cfg.min_skills_in_library}"
+                        ),
+                    }
 
             # 检查是否有足够的对局数据（策略级累计，不受版本更新重置影响）
             skills_with_enough_games = skill_query.filter(
@@ -394,11 +413,7 @@ class GEPA:
         population = []
         session = get_session()
         try:
-            roles = _faction_roles(self.gepa_cfg.faction_filter)
-            skill_query = session.query(EvolutionSkill)
-            if roles is not None:
-                skill_query = skill_query.filter(EvolutionSkill.role.in_(roles))
-            skills = skill_query.all()
+            skills = self._filtered_skill_query(session).all()
             for skill in skills:
                 versions = session.query(EvolutionSkillVersion).filter_by(
                     skill_id=skill.id

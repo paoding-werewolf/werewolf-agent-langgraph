@@ -62,6 +62,7 @@ class GEPAConfig:
     judge_model: str = "deepseek-v4-pro"
     game_service_url: str = "http://host.docker.internal:8081"
     faction_filter: str = "all"  # 进化范围: all=全部阵营 | good=仅好人阵营 | wolf=仅狼人阵营
+    role_filter: str = ""  # 单角色细化过滤（可选）: 逗号分隔角色名，如 seer / seer,witch；空=不启用
 
 
 @dataclass
