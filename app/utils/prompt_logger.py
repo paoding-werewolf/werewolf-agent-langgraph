@@ -4,6 +4,10 @@ from urllib.parse import unquote
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
+MAX_HISTORY_ENTRIES = 200                 # 内存中最多保留的条数
+TAIL_READ_BYTES = 512 * 1024              # 启动时只读文件尾部，避免大文件撑爆内存
+MAX_LOG_FILE_BYTES = 512 * 1024 * 1024    # 磁盘文件超过此值时轮转为 .1
+
 class PromptLogger:
     def __init__(self, log_file: str = "prompts_history.jsonl"):
         self.log_file = log_file
@@ -11,17 +15,28 @@ class PromptLogger:
         self._load_from_file()
 
     def _load_from_file(self):
-        """服务启动时，从磁盘恢复历史记录"""
-        if os.path.exists(self.log_file):
-            try:
-                with open(self.log_file, "r", encoding="utf-8") as f:
-                    for line in f:
-                        if line.strip():
-                            self.history.append(json.loads(line))
-                # 只保留最近 200 条，防止内存溢出
-                self.history = self.history[-200:]
-            except Exception:
-                self.history = []
+        """服务启动时，从磁盘尾部恢复最近的历史记录"""
+        if not os.path.exists(self.log_file):
+            return
+        try:
+            size = os.path.getsize(self.log_file)
+            with open(self.log_file, "rb") as f:
+                if size > TAIL_READ_BYTES:
+                    f.seek(size - TAIL_READ_BYTES)
+                    f.readline()  # 丢弃尾部起点处不完整的行
+                tail = f.read().decode("utf-8", errors="replace")
+            entries = []
+            for line in tail.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entries.append(json.loads(line))
+                except Exception:
+                    continue
+            self.history = entries[-MAX_HISTORY_ENTRIES:]
+        except Exception:
+            self.history = []
 
     def log(self, agent_id: str, phase: str, system_prompt: str, user_msg: str,
             response: str = "", session_id: str = "", external_agent_id: str = ""):
@@ -36,11 +51,21 @@ class PromptLogger:
             "response": response
         }
         self.history.append(entry)
-        
-        # 实时写入磁盘 (JSONL 格式)
+        if len(self.history) > MAX_HISTORY_ENTRIES:
+            self.history = self.history[-MAX_HISTORY_ENTRIES:]
+
+        # 实时写入磁盘 (JSONL 格式)，文件过大时先轮转
         try:
+            self._rotate_if_needed()
             with open(self.log_file, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
+    def _rotate_if_needed(self):
+        try:
+            if os.path.exists(self.log_file) and os.path.getsize(self.log_file) > MAX_LOG_FILE_BYTES:
+                os.replace(self.log_file, self.log_file + ".1")
         except Exception:
             pass
 
