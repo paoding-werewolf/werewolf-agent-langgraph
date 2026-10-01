@@ -61,6 +61,7 @@ class GEPAConfig:
     mutation_model: str = "deepseek-v4-pro"
     judge_model: str = "deepseek-v4-pro"
     game_service_url: str = "http://host.docker.internal:8081"
+    faction_filter: str = "all"  # 进化范围: all=全部阵营 | good=仅好人阵营 | wolf=仅狼人阵营
 
 
 @dataclass
