@@ -1174,7 +1174,7 @@ async def _evo_insights(request):
             EvolutionSkill, EvolutionSkillVersion, EvolutionGameArchive,
             EvolutionRuntimeState, EvolutionBufferItem,
         )
-        from sqlalchemy import func, text
+        from sqlalchemy import and_, func, or_, text
         import json
 
         session = get_session()
@@ -1205,17 +1205,31 @@ async def _evo_insights(request):
             latest_win_rate = round(win_count / total_games, 4) if total_games > 0 else 0.0
 
             # camp win rates
-            good_wins = session.query(func.count(EvolutionGameArchive.id)).filter(
-                EvolutionGameArchive.result == "good_won"
-            ).scalar() or 0
-            wolf_wins = session.query(func.count(EvolutionGameArchive.id)).filter(
-                EvolutionGameArchive.result == "wolf_won"
-            ).scalar() or 0
-            good_total = good_wins + session.query(func.count(EvolutionGameArchive.id)).filter(
-                EvolutionGameArchive.result == "wolf_won"
-            ).scalar() or 0
-            good_win_rate = round(good_wins / good_total, 4) if good_total > 0 else 0.0
-            wolf_win_rate = round(wolf_wins / good_total, 4) if good_total > 0 else 0.0
+            # 归档的 result 记录的是"本席位胜负"（won/lost），胜方阵营需由 my_role 反推：
+            # 本席位赢 → 本阵营胜；本席位输 → 对方阵营胜。
+            # 更早的历史行直接存 good_won/wolf_won，两种形态都兼容。
+            WOLF_ROLES = ("wolf", "wolf_king")
+            role_known = and_(
+                EvolutionGameArchive.my_role.isnot(None),
+                EvolutionGameArchive.my_role != "",
+            )
+            my_wolf = and_(role_known, EvolutionGameArchive.my_role.in_(WOLF_ROLES))
+            my_good = and_(role_known, EvolutionGameArchive.my_role.notin_(WOLF_ROLES))
+            good_win = or_(
+                EvolutionGameArchive.result == "good_won",
+                and_(EvolutionGameArchive.result == "won", my_good),
+                and_(EvolutionGameArchive.result == "lost", my_wolf),
+            )
+            wolf_win = or_(
+                EvolutionGameArchive.result == "wolf_won",
+                and_(EvolutionGameArchive.result == "won", my_wolf),
+                and_(EvolutionGameArchive.result == "lost", my_good),
+            )
+            good_wins = session.query(func.count(EvolutionGameArchive.id)).filter(good_win).scalar() or 0
+            wolf_wins = session.query(func.count(EvolutionGameArchive.id)).filter(wolf_win).scalar() or 0
+            decided_games = good_wins + wolf_wins
+            good_win_rate = round(good_wins / decided_games, 4) if decided_games > 0 else 0.0
+            wolf_win_rate = round(wolf_wins / decided_games, 4) if decided_games > 0 else 0.0
 
             summary = {
                 "total_games": total_games,
