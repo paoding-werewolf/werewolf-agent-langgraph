@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -8,7 +9,7 @@ from pathlib import Path
 from typing import Awaitable, Callable, Optional, Dict, Any
 
 import yaml
-from openai import AsyncOpenAI, OpenAI
+from openai import APIConnectionError, APIStatusError, AsyncOpenAI, OpenAI, Timeout
 
 from utils.prompt_logger import prompt_logger
 
@@ -208,17 +209,34 @@ class _AsyncFailoverClient:
 
     async def create(self, **kwargs):
         last: Optional[Exception] = None
-        for i, (api_key, base_url, model) in enumerate(self._caller._endpoint_chain()):
-            try:
-                client = self._caller._sdk_client(api_key, base_url, sync=False)
-                kwargs["model"] = model
-                resp = await client.chat.completions.create(**kwargs)
-                if i:
-                    logger.warning("LLM 主端点失败, 已切换备用端点 %s", base_url)
-                return resp
-            except Exception as e:
-                last = e
-                logger.warning("LLM 端点失败 (%s): %s; 尝试下一端点", base_url, e)
+        for round_index in range(3):
+            # Re-read the configuration each round so an operator can repair
+            # the endpoint chain without restarting an ongoing game.
+            chain = self._caller._endpoint_chain()
+            if not chain:
+                raise RuntimeError("No LLM endpoint is configured")
+            transient_failure = False
+            for i, (api_key, base_url, model) in enumerate(chain):
+                try:
+                    client = self._caller._sdk_client(api_key, base_url, sync=False)
+                    kwargs["model"] = model
+                    resp = await client.chat.completions.create(**kwargs)
+                    if i:
+                        logger.warning("LLM 主端点失败, 已切换备用端点 %s", base_url)
+                    return resp
+                except Exception as e:
+                    last = e
+                    transient_failure |= isinstance(e, APIConnectionError) or (
+                        isinstance(e, APIStatusError)
+                        and (e.status_code in (408, 409, 429) or e.status_code >= 500)
+                    )
+                    logger.warning("LLM 端点失败 (%s): %s; 尝试下一端点", base_url, e)
+            if not transient_failure or round_index == 2:
+                break
+            delay = 5 * (2 ** round_index)
+            logger.warning("LLM 端点本轮均失败，%s 秒后重试 (轮次 %s/3)", delay, round_index + 2)
+            await asyncio.sleep(delay)
+        assert last is not None
         raise last
 
 
@@ -254,9 +272,16 @@ class LLMCaller:
         key = (sync, base_url, api_key)
         if key not in self._clients:
             cls = OpenAI if sync else AsyncOpenAI
-            self._clients[key] = cls(
-                api_key=api_key, base_url=base_url, timeout=180.0 if sync else 120.0
-            )
+            if sync:
+                self._clients[key] = cls(api_key=api_key, base_url=base_url, timeout=180.0)
+            else:
+                # Don't spend three 120-second connection attempts on a dead
+                # primary before considering a working backup. Slow responses
+                # still have the original read timeout.
+                self._clients[key] = cls(
+                    api_key=api_key, base_url=base_url,
+                    timeout=Timeout(120.0, connect=8.0), max_retries=0,
+                )
         return self._clients[key]
 
     def _require_api_key(self) -> str:
