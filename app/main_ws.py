@@ -1152,6 +1152,7 @@ def _create_http_app():
     app.router.add_get("/evolution/games", _evo_games)
     app.router.add_get("/evolution/curator/status", _evo_curator_status)
     app.router.add_post("/evolution/curator/trigger", _evo_curator_trigger)
+    app.router.add_post("/evolution/curator/timeout-patrol", _evo_timeout_patrol)
     app.router.add_post("/evolution/gepa/trigger", _evo_gepa_trigger)
     app.router.add_get("/evolution/gepa/status", _evo_gepa_status)
     app.router.add_post("/evolution/gepa/cancel", _evo_gepa_cancel)
@@ -2119,6 +2120,11 @@ async def _evo_curator_status(request):
                 "is_overdue": is_overdue,
                 "running": payload.get("running", False),
             },
+            "timeout_patrol": {
+                "enabled": cfg.curator.timeout_patrol_enabled,
+                "threshold": cfg.curator.timeout_rate_threshold,
+                "last": payload.get("last_timeout_patrol"),
+            },
         })
     except Exception as e:
         return aiohttp_web.json_response({"detail": str(e)}, status=500)
@@ -2162,6 +2168,25 @@ async def _evo_curator_trigger(request):
             "status": "started",
         })
     except Exception as e:
+        return aiohttp_web.json_response({"success": False, "detail": str(e)}, status=500)
+
+
+async def _evo_timeout_patrol(request):
+    """手动触发 timeout 污染巡检（同步返回结果；?dry_run=true 只预览不删除）。"""
+    try:
+        from evolution.config import load_config
+        from evolution.timeout_patrol import run_timeout_patrol
+
+        cfg = load_config()
+        dry_run = request.query.get("dry_run", "").lower() in ("1", "true", "yes")
+        summary = await asyncio.to_thread(
+            run_timeout_patrol,
+            threshold=cfg.curator.timeout_rate_threshold,
+            dry_run=dry_run,
+        )
+        return aiohttp_web.json_response({"success": True, **summary})
+    except Exception as e:
+        logger.exception("[TimeoutPatrol] 手动巡检失败")
         return aiohttp_web.json_response({"success": False, "detail": str(e)}, status=500)
 
 

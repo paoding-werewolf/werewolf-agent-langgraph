@@ -49,6 +49,8 @@ class CuratorConfig:
     interval_hours: int = 12  # 12 hours
     min_idle_hours: int = 2
     max_iterations: int = 24
+    timeout_patrol_enabled: bool = True
+    timeout_rate_threshold: float = 0.15
 
 
 @dataclass
