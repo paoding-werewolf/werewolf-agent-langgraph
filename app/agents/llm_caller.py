@@ -163,6 +163,13 @@ def _error_action(error_type: AgentErrorType, message: str) -> Dict[str, Any]:
     }
 
 
+def _apply_extra_body(kwargs: Dict[str, Any]) -> None:
+    """把 config.yaml llm.extra_body 透传给网关（如 vLLM 的 chat_template_kwargs）。"""
+    extra = _runtime_llm_config().get("extra_body") or {}
+    if isinstance(extra, dict) and extra:
+        kwargs["extra_body"] = {**extra, **(kwargs.get("extra_body") or {})}
+
+
 class _SyncFailoverClient:
     """同步 LLM 客户端代理：按主备链路执行 create，主端点异常自动切换备用。"""
 
@@ -179,6 +186,7 @@ class _SyncFailoverClient:
 
     def create(self, **kwargs):
         last: Optional[Exception] = None
+        _apply_extra_body(kwargs)
         for i, (api_key, base_url, model) in enumerate(self._caller._endpoint_chain()):
             try:
                 client = self._caller._sdk_client(api_key, base_url, sync=True)
@@ -209,6 +217,7 @@ class _AsyncFailoverClient:
 
     async def create(self, **kwargs):
         last: Optional[Exception] = None
+        _apply_extra_body(kwargs)
         for round_index in range(3):
             # Re-read the configuration each round so an operator can repair
             # the endpoint chain without restarting an ongoing game.
