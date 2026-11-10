@@ -10,37 +10,21 @@ steps:
       - python -m compileall app/
 
   - name: deploy
-    image: docker:27
-    environment:
-      DATABASE_URL:
-        from_secret: database_url
-      OPENAI_API_KEY:
-        from_secret: openai_api_key
-      OPENAI_BASE_URL:
-        from_secret: openai_base_url
-      OPENAI_MODEL:
-        from_secret: openai_model
+    image: docker:27-cli
     volumes:
       - name: docker-sock
         path: /var/run/docker.sock
       - name: project-dir
         path: /deploy
     commands:
-      - apk add --no-cache git
+      - apk add --no-cache git docker-cli-compose
+      # Only application source is synced; production keeps its own .env.
+      - git -C /drone/src archive --format=tar --output=/tmp/source.tar HEAD app Dockerfile requirements.txt docker-compose.yml migrations scripts
+      - tar -xf /tmp/source.tar -C /deploy
       - cd /deploy
-      - git fetch origin main
-      - git reset --hard origin/main
-      - |
-        cat > .env <<EOF
-        DATABASE_URL=$DATABASE_URL
-        OPENAI_API_KEY=$OPENAI_API_KEY
-        OPENAI_BASE_URL=$OPENAI_BASE_URL
-        OPENAI_MODEL=$OPENAI_MODEL
-        EOF
-      - docker compose -p werewolf-agent-langgraph down
-      - docker rm -f werewolf-agent-langgraph 2>/dev/null || true
       - docker compose -p werewolf-agent-langgraph build werewolf-agent
       - docker compose -p werewolf-agent-langgraph up -d --force-recreate --remove-orphans werewolf-agent
+      - docker image prune -f
     when:
       branch:
         - main
@@ -53,7 +37,7 @@ volumes:
       path: /var/run/docker.sock
   - name: project-dir
     host:
-      path: /root/werewolf-agent-langgraph
+      path: /opt/werewolf/werewolf-agent-langgraph
 
 trigger:
   branch:
